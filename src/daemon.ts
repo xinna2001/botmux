@@ -512,8 +512,12 @@ let vcMeetingTerminalReconciler: VcMeetingTerminalReconciler | undefined;
 import { isBotMentioned, probeBotOpenId, startLarkEventDispatcher, markForwardFollowupsSessionsReady, writeBotInfoFile, canOperate, canRunDaemonCommand, evaluateTalk, evaluateBotTalk, evaluateAskAnswerTalk, askCustomReplyCandidate, grantCommandRestriction, isKnownPeerBot, resolveSiblingBotNameByUnionId, checkRequiredScopes, ensureVcMeetingEventsSubscribed, type RoutingContext, type TalkEvaluation, type DocCommentContext, type EventHandlers } from './im/lark/event-dispatcher.js';
 import { getDocSubscription, listAllDocSubscriptions, listDocSubscriptionsForSession, putDocSubscription, removeDocSubscription, setDocCommentPollCursor, type DocSubscription } from './services/doc-subs-store.js';
 import { BOT_REPLY_SENTINEL, subscribeDocFile, unsubscribeDocFile, addCommentReaction, removeCommentReaction, hasBotSentinel, isBotAuthoredReply, listDocComments } from './im/lark/doc-comment.js';
-import { learnFromMentions, resolveSender, flushIdentityCacheSync, type ResolvedSender } from './im/lark/identity-cache.js';
+import { learnFromMentions, recordIdentity, resolveSender, flushIdentityCacheSync, type ResolvedSender } from './im/lark/identity-cache.js';
 import { normalizeBrand } from './im/lark/lark-hosts.js';
+import { createExternalImConnector } from './im/connector-factory.js';
+import { registerImConnector, stopAllImConnectors } from './im/connector-registry.js';
+import { isLarkPlatform, resolveImPlatform } from './im/platform.js';
+import type { UnifiedImInboundMessage } from './im/types.js';
 import { buildDocCommentTurnInput, buildDocWatchWarmupTurnInput } from './core/doc-comment-prompt.js';
 import { advanceDocCommentCursor, docCommentRepliesAfterCursor, latestDocCommentPollCursor } from './core/doc-comment-poller.js';
 import { renderBufferedSenderBlock } from './core/session-manager.js';
@@ -5306,6 +5310,74 @@ const v3GateRunner = createV3GateRunner({
 // 每个 bot 的 EventHandlers，授权成功后重放消息时需要。
 // key = larkAppId，在 startLarkEventDispatcher 调用时写入。
 const botHandlers = new Map<string, EventHandlers>();
+
+function unifiedMessageAsLegacyEvent(message: UnifiedImInboundMessage): any {
+  return {
+    sender: {
+      sender_id: { open_id: message.sender.id },
+      sender_type: message.sender.type === 'bot' ? 'bot' : 'user',
+    },
+    message: {
+      message_id: message.messageId,
+      chat_id: message.chatId,
+      chat_type: message.chatType,
+      message_type: 'text',
+      content: JSON.stringify({ text: message.text }),
+      create_time: String(message.createdAt),
+      ...(message.threadId ? { thread_id: message.threadId, root_id: message.threadId } : {}),
+      ...(message.parentMessageId ? { parent_id: message.parentMessageId } : {}),
+    },
+  };
+}
+
+async function dispatchUnifiedImMessage(message: UnifiedImInboundMessage): Promise<void> {
+  const bot = getBot(message.appId);
+  const talk = evaluateTalk(
+    message.appId,
+    message.chatId,
+    message.sender.id,
+    undefined,
+    undefined,
+    message.chatType,
+  );
+  if (!talk.allowed) {
+    logger.info(
+      `[${message.platform}:${message.appId}] ignored message from non-allowed sender `
+      + `${message.sender.id} chat=${message.chatId}`,
+    );
+    return;
+  }
+  recordIdentity(message.appId, {
+    openId: message.sender.id,
+    type: message.sender.type,
+    name: message.sender.name,
+    // Non-Lark connectors already supplied their authoritative platform
+    // identity. Mark it resolved so identity injection never calls Lark APIs.
+    contactResolvedAt: Date.now(),
+    source: 'sender',
+  });
+  const data = unifiedMessageAsLegacyEvent(message);
+  const scope: 'chat' = 'chat';
+  const anchor = message.chatId;
+  const ctx: RoutingContext = {
+    chatId: message.chatId,
+    messageId: message.messageId,
+    chatType: message.chatType,
+    larkAppId: message.appId,
+    scope,
+    anchor,
+  };
+  const existing = activeSessions.get(sessionKey(anchor, message.appId));
+  if (existing?.session.status === 'active') {
+    await handleThreadReply(data, ctx);
+  } else {
+    await handleNewTopic(data, ctx);
+  }
+  logger.debug(
+    `[${message.platform}:${message.appId}] accepted ${message.messageId} `
+    + `for ${bot.config.cliId} session route ${anchor}`,
+  );
+}
 
 const codexNotifierStores = new Map<string, CodexNotifierEventStore>();
 const codexNotifierDeliveries = new Map<string, Promise<{ status: 'accepted'; messageId: string }>>();
@@ -22872,7 +22944,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // Do not start any Lark dispatcher until durable sessions have been restored
   // into the routing registry. Otherwise an inbound same-anchor turn can create
   // a second owner while the old unsettled row exists only on disk.
-  const startEventDispatchers: Array<() => void> = [];
+  const startEventDispatchers: Array<() => unknown> = [];
 
   // Per-bot initialization
   for (const bot of getAllBots()) {
@@ -22885,7 +22957,8 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     // their HTTP control-API triggers authenticate via the dashboard token, not
     // allowedUsers, and resolving email/union_id entries would call the Feishu
     // contact API — a network round-trip a no-Feishu bot must never make.
-    if (!cfg.apiOnly && ((bot.config.allowedUsers?.length ?? 0) > 0 || bot.resolvedAllowedUsers.length > 0)) {
+    if (!cfg.apiOnly && ((bot.config.allowedUsers?.length ?? 0) > 0 || bot.resolvedAllowedUsers.length > 0)
+      && isLarkPlatform(cfg)) {
       // 含邮箱或 union_id(on_) 都要重解析成本 app 的 open_id —— 否则 canTalk/canOperate
       // 拿 sender 的 ou_ 对不上 on_，owner 会被自己的 bot 锁死（PR#72）。
       // literal ou_ 也走 best-effort 校验，用于诊断把其他 app 视角 open_id
@@ -22972,60 +23045,69 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       bot.botName ||= cfg.displayName ?? cfg.larkAppId;
       logger.info(`[api-only] ${cfg.larkAppId} 以 core-only 模式启动：跳过飞书 open_id 探测 / scope 校验 / WSClient 订阅，仅 HTTP 控制 API 驱动`);
     } else {
-    // Probe bot open_id and persist to bots-info.json. When the friendly
-    // botName comes back from /bot/v3/info, refresh the dashboard descriptor
-    // so the registry shows "Claude" / "Codex" instead of the raw app id.
-    // A custom displayName (bots.json) beats the probed Lark name — the probe
-    // must not overwrite a rename seeded at startup.
-    probeBotOpenId(cfg.larkAppId).then(() => {
-      writeBotInfoFile(config.session.dataDir);
-      const probedName = cfg.displayName ?? bot.botName;
-      const probedAvatar = bot.botAvatarUrl;
-      let descChanged = false;
-      if (probedName && probedName !== desc.botName) {
-        desc.botName = probedName;
-        descChanged = true;
+      if (isLarkPlatform(cfg)) {
+        // Probe bot open_id and persist to bots-info.json. When the friendly
+        // botName comes back from /bot/v3/info, refresh the dashboard descriptor
+        // so the registry shows "Claude" / "Codex" instead of the raw app id.
+        // A custom displayName (bots.json) beats the probed Lark name — the probe
+        // must not overwrite a rename seeded at startup.
+        probeBotOpenId(cfg.larkAppId).then(() => {
+          writeBotInfoFile(config.session.dataDir);
+          const probedName = cfg.displayName ?? bot.botName;
+          const probedAvatar = bot.botAvatarUrl;
+          let descChanged = false;
+          if (probedName && probedName !== desc.botName) {
+            desc.botName = probedName;
+            descChanged = true;
+          }
+          if (probedAvatar && probedAvatar !== desc.botAvatarUrl) {
+            desc.botAvatarUrl = probedAvatar;
+            descChanged = true;
+          }
+          if (descChanged) {
+            try { writeDaemonDescriptor(desc); } catch { /* best effort */ }
+          }
+          // SessionRow.botName 同步换成友好名——否则 dashboard 会话行一直显示
+          // 启动时 seed 的 larkAppId（web 端有注册表映射兜底，这里是根因修复）。
+          if (probedName) setBotName(probedName);
+        }).catch(err => {
+          // Probe runs in background and is retried by the periodic heartbeat;
+          // a single failure here is not actionable. Surface as debug only.
+          logger.debug(`[${cfg.larkAppId}] Bot open_id probe failed (will retry): ${err.message}`);
+        });
+      } else {
+        const platform = resolveImPlatform(cfg);
+        bot.botOpenId ||= `bot_${platform}_${cfg.larkAppId}`;
+        bot.botName ||= cfg.displayName ?? cfg.name ?? cfg.larkAppId;
+        logger.info(`[${platform}:${cfg.larkAppId}] using external IM connector`);
       }
-      if (probedAvatar && probedAvatar !== desc.botAvatarUrl) {
-        desc.botAvatarUrl = probedAvatar;
-        descChanged = true;
-      }
-      if (descChanged) {
-        try { writeDaemonDescriptor(desc); } catch { /* best effort */ }
-      }
-      // SessionRow.botName 同步换成友好名——否则 dashboard 会话行一直显示
-      // 启动时 seed 的 larkAppId（web 端有注册表映射兜底，这里是根因修复）。
-      if (probedName) setBotName(probedName);
-    }).catch(err => {
-      // Probe runs in background and is retried by the periodic heartbeat;
-      // a single failure here is not actionable. Surface as debug only.
-      logger.debug(`[${cfg.larkAppId}] Bot open_id probe failed (will retry): ${err.message}`);
-    });
-    } // end !cfg.apiOnly (open_id probe)
+    } // end !cfg.apiOnly
 
     // Required-scope check: 启动后 best-effort 校验
     // im:message.group_at_msg.include_bot:readonly。缺失会 logger.error +
     // 私信 allowedUsers[0]。校验异步，跑失败不影响 daemon。
     // apiOnly 无飞书连接 → 无 scope 概念，跳过。
     if (!cfg.apiOnly) {
-      checkRequiredScopes(cfg.larkAppId).catch(err => {
-        logger.debug(`[${cfg.larkAppId}] required-scope check failed: ${err?.message ?? err}`);
-      });
-      // Ensure VC meeting events are subscribed so ANY invited bot can receive
-      // meeting invites (bot-agnostic auto-join). Check-first + best-effort: a
-      // read-only probe over the cached web session, auto-subscribing only when
-      // events are missing. Never blocks boot; the fn itself skips VC-inactive
-      // bots via vcMeetingAgentConfigActive.
-      ensureVcMeetingEventsSubscribed(cfg.larkAppId).catch(err => {
-        logger.debug(`[${cfg.larkAppId}] VC event subscription check failed: ${err?.message ?? err}`);
-      });
+      if (isLarkPlatform(cfg)) {
+        checkRequiredScopes(cfg.larkAppId).catch(err => {
+          logger.debug(`[${cfg.larkAppId}] required-scope check failed: ${err?.message ?? err}`);
+        });
+        // Ensure VC meeting events are subscribed so ANY invited bot can receive
+        // meeting invites (bot-agnostic auto-join). Check-first + best-effort: a
+        // read-only probe over the cached web session, auto-subscribing only when
+        // events are missing. Never blocks boot; the fn itself skips VC-inactive
+        // bots via vcMeetingAgentConfigActive.
+        ensureVcMeetingEventsSubscribed(cfg.larkAppId).catch(err => {
+          logger.debug(`[${cfg.larkAppId}] VC event subscription check failed: ${err?.message ?? err}`);
+        });
+      }
     }
 
     // 主动开工 — 场景①: the bot.added event can't be self-verified via API, and
     // if it isn't subscribed the handler simply never fires (no runtime signal).
     // Surface a startup breadcrumb whenever the toggle is on so a misconfigured
     // event subscription is at least visible in the logs.
-    if (cfg.autoStartOnGroupJoin) {
+    if (cfg.autoStartOnGroupJoin && isLarkPlatform(cfg)) {
       logger.info(
         `[auto-start:入群] ${cfg.larkAppId} autoStartOnGroupJoin 已开启 —— ` +
         `请确认飞书开放平台已订阅事件 im.chat.member.bot.added_v1 且开通群成员读取权限，否则被拉群不会触发。`,
@@ -23078,12 +23160,23 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     // apiOnly bots never subscribe to Feishu events → no WSClient. This is the
     // core decoupling: the daemon serves the HTTP control API only.
     if (!cfg.apiOnly) {
-      startEventDispatchers.push(() => startLarkEventDispatcher(
-        cfg.larkAppId,
-        cfg.larkAppSecret,
-        botEventHandlers,
-        normalizeBrand(cfg.brand),
-      ));
+      if (isLarkPlatform(cfg)) {
+        startEventDispatchers.push(() => startLarkEventDispatcher(
+          cfg.larkAppId,
+          cfg.larkAppSecret,
+          botEventHandlers,
+          normalizeBrand(cfg.brand),
+        ));
+      } else {
+        const connector = createExternalImConnector(cfg);
+        if (!connector) {
+          throw new Error(`No connector implementation for platform ${resolveImPlatform(cfg)}`);
+        }
+        registerImConnector(connector);
+        startEventDispatchers.push(() => connector.start({
+          onMessage: dispatchUnifiedImMessage,
+        }));
+      }
     }
 
     // A distillation command is durably prepared before its model run/card
@@ -23139,14 +23232,14 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // (so root-linked clarifications can pair with them), but their flushes wait
   // for this signal so isSessionOwner reads the populated map.
   for (const bot of getAllBots()) {
-    markForwardFollowupsSessionsReady(bot.config.larkAppId);
+    if (isLarkPlatform(bot.config)) markForwardFollowupsSessionsReady(bot.config.larkAppId);
   }
   // The descriptor was intentionally published before restore so offline CLI
   // mutations delegate to this daemon.  Release those queued IPC calls only
   // after every durable owner is visible in the canonical registry.
   markIpcReady();
 
-  for (const startDispatcher of startEventDispatchers) startDispatcher();
+  for (const startDispatcher of startEventDispatchers) await startDispatcher();
 
   try {
     await reconcileVcMeetingManagedActionsOnBoot(cfg.larkAppId);
@@ -23767,6 +23860,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     // writer cannot slip a commit under a write-back that is still coming.
     claimOccupancy();
     removeDaemonDescriptor(cfg.larkAppId, desc.bootInstanceId);
+    await Promise.race([stopAllImConnectors(), delay(2_000)]);
     ipcHandle.close().catch(() => { /* swallow */ });
     if (terminalProxy) terminalProxy.close().catch(() => { /* swallow */ });
 

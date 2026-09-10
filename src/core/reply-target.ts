@@ -45,7 +45,8 @@ export function buildTurnParticipantsFrom(
   // `user_id:'all'`) and any non-`ou_` shape are NOT executable `--mention`
   // targets — never list them; mark the window incomplete instead. One check
   // here covers BOTH the text (structured mentions) and post-at lanes.
-  const isExecutableOpenId = (id: string | undefined): id is string => !!id && id.startsWith('ou_');
+  const isExecutableOpenId = (id: string | undefined): id is string =>
+    !!id && (id.startsWith('ou_') || id.startsWith('dt_') || id.startsWith('ww_'));
   if (isExecutableOpenId(sender.openId)) {
     if (sender.openId !== selfOpenId) {
       out.push({

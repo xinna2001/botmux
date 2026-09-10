@@ -14373,7 +14373,16 @@ async function spawnCli(
       mkdirSync(dirname(credPath), { recursive: true });
       writeFileSync(
         credPath,
-        JSON.stringify({ larkAppId: cfg.larkAppId, larkAppSecret: cfg.larkAppSecret, brand: cfg.brand, apiOnly: cfg.apiOnly, feedback: cfg.feedback }),
+        JSON.stringify({
+          larkAppId: cfg.larkAppId,
+          larkAppSecret: cfg.larkAppSecret,
+          brand: cfg.brand,
+          platform: cfg.platform,
+          dingtalk: cfg.dingtalk,
+          wecom: cfg.wecom,
+          apiOnly: cfg.apiOnly,
+          feedback: cfg.feedback,
+        }),
         { mode: 0o600 },
       );
     } catch (e) {
@@ -19424,7 +19433,13 @@ process.on('message', async (raw: unknown) => {
       // a NORMAL bot whose turn runs in an HTTP virtual session (chatId is
       // http_async_*/http_wait_*): it has real creds so apiOnly is false, but the
       // synthetic chat has no card to attach a screenshot to.
-      apiOnlyForUpload = !sessionLarkTransportEnabled({ chatId: msg.chatId, apiOnly: msg.apiOnly });
+      const usesLarkUpload = msg.platform === undefined
+        || msg.platform === 'feishu'
+        || msg.platform === 'lark';
+      apiOnlyForUpload = !sessionLarkTransportEnabled({
+        chatId: msg.chatId,
+        apiOnly: msg.apiOnly,
+      }) || !usesLarkUpload;
       // brand 决定截图上传打哪个域（feishu / larksuite）。缺省 feishu。
       larkBrandForUpload = msg.brand === 'lark' ? 'lark' : 'feishu';
       // Resolve render dimensions BEFORE startScreenUpdates() — the

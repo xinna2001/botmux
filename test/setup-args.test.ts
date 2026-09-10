@@ -281,6 +281,60 @@ describe('buildBotFromAddFlags', () => {
     expect(() => buildBotFromAddFlags({ ...REQUIRED, brand: 'slack' })).toThrow(/--brand 必须是 feishu 或 lark/);
   });
 
+  it('builds DingTalk Stream config with provider-scoped user ids', () => {
+    const bot = buildBotFromAddFlags({
+      appId: 'ding-client-id',
+      appSecret: 'ding-client-secret',
+      allowedUsers: 'dt_staff_123',
+      platform: 'dingtalk',
+      robotCode: 'ding-robot-code',
+    });
+    expect(bot).toMatchObject({
+      larkAppId: 'ding-client-id',
+      larkAppSecret: 'ding-client-secret',
+      platform: 'dingtalk',
+      dingtalk: { robotCode: 'ding-robot-code' },
+      allowedUsers: ['dt_staff_123'],
+      defaultWorkingDir: '~',
+    });
+  });
+
+  it('builds WeCom callback config and validates numeric fields', () => {
+    const bot = buildBotFromAddFlags({
+      appId: 'wecom-agent',
+      appSecret: 'wecom-secret',
+      allowedUsers: 'ww_user_123',
+      platform: 'wecom',
+      corpId: 'ww-corp',
+      agentId: '1000002',
+      callbackToken: 'callback-token',
+      encodingAesKey: 'a'.repeat(43),
+      callbackPort: '8788',
+      callbackPath: '/callbacks/wecom',
+    });
+    expect(bot).toMatchObject({
+      platform: 'wecom',
+      wecom: {
+        corpId: 'ww-corp',
+        agentId: 1000002,
+        token: 'callback-token',
+        encodingAesKey: 'a'.repeat(43),
+        callbackPort: 8788,
+        callbackPath: '/callbacks/wecom',
+      },
+      defaultWorkingDir: '~',
+    });
+    expect(() => buildBotFromAddFlags({
+      ...REQUIRED,
+      platform: 'wecom',
+      corpId: 'ww-corp',
+      agentId: 'bad',
+      callbackToken: 'token',
+      encodingAesKey: 'a'.repeat(43),
+      callbackPort: '8788',
+    })).toThrow(/--agent-id/);
+  });
+
   it('fixed default dir mode: --default-working-dir alone leaves workingDir unset', () => {
     const bot = buildBotFromAddFlags({ ...REQUIRED, defaultWorkingDir: '/data/proj' });
     expect(bot.defaultWorkingDir).toBe('/data/proj');

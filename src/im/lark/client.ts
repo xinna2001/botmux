@@ -17,8 +17,20 @@ import { canonicalMobileKey, isMobileEntry, normalizeMobileEntry } from '../../s
 import { stampBotmuxCallbackMarkers } from './callback-button-marker.js';
 import { executeWithLarkGate } from './api-gate.js';
 import type { ChatContext } from '../../types.js';
+import { getImConnector } from '../connector-registry.js';
+import { isLarkPlatform } from '../platform.js';
+import { createExternalImConnector } from '../connector-factory.js';
 
 type LarkRequestParams = Record<string, string | number | boolean | undefined>;
+
+function externalConnectorFor(larkAppId: string) {
+  const registered = getImConnector(larkAppId);
+  if (registered) return registered;
+  const bot = getBot(larkAppId);
+  return isLarkPlatform(bot.config)
+    ? undefined
+    : createExternalImConnector(bot.config);
+}
 
 export interface LarkRequestOptions {
   /** Axios 层的真实请求超时；不设置时保持 SDK 原有行为。 */
@@ -101,7 +113,8 @@ function loadAllBotClientConfigs(): Array<{ larkAppId: string; larkAppSecret: st
   // would otherwise auth-fail against the synthetic app, adding latency+noise to
   // the healthy bot path. Filtering here covers both discovery and the strict
   // stable-App resolver from one place.
-  const notApiOnly = (c: { apiOnly?: boolean }) => c.apiOnly !== true;
+  const notApiOnly = (c: { apiOnly?: boolean; platform?: import('../types.js').ImPlatform; brand?: Brand }) =>
+    c.apiOnly !== true && isLarkPlatform(c);
   try {
     return loadBotConfigs().filter(notApiOnly);
   } catch {
@@ -289,6 +302,21 @@ export async function sendMessage(
   hookContext?: Record<string, unknown>,
   options?: OutboundMessageOptions,
 ): Promise<string> {
+  const connector = externalConnectorFor(larkAppId);
+  if (connector) {
+    const messageId = await connector.sendMessage(chatId, content, msgType);
+    await emitOutboundHookIfAllowed(options, 'outbound.send', {
+      ...hookContext,
+      larkAppId,
+      chatId,
+      messageId,
+      msgType,
+      uuid,
+      content,
+      platform: connector.platform,
+    });
+    return messageId;
+  }
   assertLarkTransport(larkAppId, 'sendMessage');
   return executeWithLarkGate(larkAppId, 'sendMessage', async () => {
     const c = getBotClient(larkAppId);
@@ -352,6 +380,22 @@ export async function replyMessage(
   hookContext?: Record<string, unknown>,
   options?: OutboundMessageOptions,
 ): Promise<string> {
+  const connector = externalConnectorFor(larkAppId);
+  if (connector) {
+    const replyId = await connector.replyMessage(messageId, content, msgType);
+    await emitOutboundHookIfAllowed(options, 'outbound.reply', {
+      ...hookContext,
+      larkAppId,
+      messageId,
+      replyId,
+      msgType,
+      replyInThread,
+      uuid,
+      content,
+      platform: connector.platform,
+    });
+    return replyId;
+  }
   assertLarkTransport(larkAppId, 'replyMessage');
   return executeWithLarkGate(larkAppId, 'replyMessage', async () => {
     const c = getBotClient(larkAppId);
@@ -400,6 +444,8 @@ export async function replyMessage(
 }
 
 export async function addReaction(larkAppId: string, messageId: string, emojiType: string): Promise<string> {
+  const connector = externalConnectorFor(larkAppId);
+  if (connector) return connector.addReaction?.(messageId, emojiType) ?? '';
   assertLarkTransport(larkAppId, 'addReaction');
   return executeWithLarkGate(larkAppId, 'addReaction', async () => {
     const c = getBotClient(larkAppId);
@@ -417,6 +463,11 @@ export async function addReaction(larkAppId: string, messageId: string, emojiTyp
 }
 
 export async function removeReaction(larkAppId: string, messageId: string, reactionId: string): Promise<void> {
+  const connector = externalConnectorFor(larkAppId);
+  if (connector) {
+    await connector.removeReaction?.(messageId, reactionId);
+    return;
+  }
   assertLarkTransport(larkAppId, 'removeReaction');
   return executeWithLarkGate(larkAppId, 'removeReaction', async () => {
     const c = getBotClient(larkAppId);
@@ -589,6 +640,11 @@ export async function sendUserMessage(
   uuid?: string,
   requestOptions?: LarkRequestOptions,
 ): Promise<string> {
+  const connector = externalConnectorFor(larkAppId);
+  if (connector) {
+    await connector.sendDirectMessage(openId, content);
+    return `${connector.platform}-dm-${uuid ?? Date.now()}`;
+  }
   assertLarkTransport(larkAppId, 'sendUserMessage');
   return executeWithLarkGate(
     larkAppId,
@@ -706,6 +762,8 @@ export async function listChatMemberOpenIds(larkAppId: string, chatId: string): 
  * returned name may be an empty string; treat that as "no display name" and
  * also fall back. */
 export async function getChatName(larkAppId: string, chatId: string): Promise<string | null> {
+  const connector = externalConnectorFor(larkAppId);
+  if (connector) return (await connector.getChatContext?.(chatId))?.name ?? null;
   try {
     const c = getBotClient(larkAppId);
     const res = await larkGet(c, `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}`);
@@ -729,6 +787,13 @@ export async function getChatContext(larkAppId: string, chatId: string): Promise
     mode: 'unknown',
     fetchStatus: 'unavailable',
   };
+  const connector = externalConnectorFor(larkAppId);
+  if (connector) {
+    const context = await connector.getChatContext?.(chatId);
+    return context
+      ? { chatId, ...context, fetchStatus: 'ok' }
+      : unavailable;
+  }
   try {
     const c = getBotClient(larkAppId);
     const res = await larkGet(c, `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}`);
@@ -788,6 +853,14 @@ export async function getChatNameAndMode(
   larkAppId: string,
   chatId: string,
 ): Promise<{ name: string | null; mode: ChatMode }> {
+  const connector = externalConnectorFor(larkAppId);
+  if (connector) {
+    const context = await connector.getChatContext?.(chatId);
+    return {
+      name: context?.name ?? null,
+      mode: context?.mode === 'p2p' || context?.mode === 'topic' ? context.mode : 'group',
+    };
+  }
   const cacheKey = `${larkAppId}::${chatId}`;
   const cached = chatInfoCache.get(cacheKey);
   if (cached && Date.now() - cached.cachedAt < CHAT_INFO_TTL_MS) {
@@ -854,6 +927,11 @@ const CHAT_MODE_TTL_MS = 5 * 60 * 1000; // 5 min — chat_mode can change when a
  * cache on success so a following {@link getChatMode} hits it.
  */
 export async function getChatModeStrict(larkAppId: string, chatId: string): Promise<ChatMode | 'unknown'> {
+  const connector = externalConnectorFor(larkAppId);
+  if (connector) {
+    const mode = (await connector.getChatContext?.(chatId))?.mode;
+    return mode === 'group' || mode === 'topic' || mode === 'p2p' ? mode : 'unknown';
+  }
   try {
     const c = getBotClient(larkAppId);
     const res = await larkGet(c, `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}`);
@@ -928,6 +1006,8 @@ export async function getChatMode(
  * fall back instead of assuming success. Fire-and-forget callers can ignore it.
  */
 export async function deleteMessage(larkAppId: string, messageId: string): Promise<boolean> {
+  const connector = externalConnectorFor(larkAppId);
+  if (connector) return connector.deleteMessage?.(messageId) ?? false;
   assertLarkTransport(larkAppId, 'deleteMessage');
   return executeWithLarkGate(larkAppId, 'deleteMessage', async () => {
     const c = getBotClient(larkAppId);
@@ -1129,6 +1209,11 @@ export async function deleteEphemeralCard(larkAppId: string, messageId: string):
 }
 
 export async function updateMessage(larkAppId: string, messageId: string, cardJson: string): Promise<void> {
+  const connector = externalConnectorFor(larkAppId);
+  if (connector) {
+    await connector.updateMessage(messageId, cardJson);
+    return;
+  }
   assertLarkTransport(larkAppId, 'updateMessage');
   return executeWithLarkGate(larkAppId, 'updateMessage', async () => {
     const c = getBotClient(larkAppId);

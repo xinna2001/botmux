@@ -19,6 +19,8 @@ import type { CliRuntimeConfig } from '../adapters/cli/runtime.js';
 
 /** add / edit 共用的 bot 字段 flag（原始字符串，'-' 表示清空，语义同 TUI 编辑）。 */
 export interface SetupBotFlags {
+  /** IM transport. Missing keeps the historical Feishu default. */
+  platform?: string;
   name?: string;
   /** 仅 add --create-app：飞书开放平台应用名称；留空由执行层生成 botmux-N。 */
   appName?: string;
@@ -41,6 +43,19 @@ export interface SetupBotFlags {
   showInTeam?: string;
   /** 仅 add：feishu | lark。 */
   brand?: string;
+  /** DingTalk robot code, required for proactive messages. */
+  robotCode?: string;
+  /** WeCom enterprise id. */
+  corpId?: string;
+  /** WeCom self-built application AgentId. */
+  agentId?: string;
+  /** WeCom callback Token. */
+  callbackToken?: string;
+  /** WeCom callback EncodingAESKey. */
+  encodingAesKey?: string;
+  callbackHost?: string;
+  callbackPort?: string;
+  callbackPath?: string;
 }
 
 export type SetupCommand =
@@ -64,6 +79,7 @@ export function isScriptedSetupInvocation(argv: string[]): boolean {
 }
 
 const BOT_FIELD_FLAGS: Record<string, keyof SetupBotFlags> = {
+  '--platform': 'platform',
   '--name': 'name',
   '--app-name': 'appName',
   '--app-id': 'appId',
@@ -80,6 +96,14 @@ const BOT_FIELD_FLAGS: Record<string, keyof SetupBotFlags> = {
   '--allowed-chat-groups': 'allowedChatGroups',
   '--show-in-team': 'showInTeam',
   '--brand': 'brand',
+  '--robot-code': 'robotCode',
+  '--corp-id': 'corpId',
+  '--agent-id': 'agentId',
+  '--callback-token': 'callbackToken',
+  '--encoding-aes-key': 'encodingAesKey',
+  '--callback-host': 'callbackHost',
+  '--callback-port': 'callbackPort',
+  '--callback-path': 'callbackPath',
 };
 
 export const SETUP_CLI_USAGE = `botmux setup — 脚本化（非 TUI）用法
@@ -104,6 +128,16 @@ export const SETUP_CLI_USAGE = `botmux setup — 脚本化（非 TUI）用法
       使用已有凭证添加机器人。必填：--app-id / --app-secret / --allowed-users。
       owner 可用完整邮箱、手机号、union_id on_xxx，或该应用自己签发的
       open_id ou_xxx；写盘前会用凭证校验，失败不写盘。
+
+  botmux setup add --platform dingtalk --app-id <ClientID> --app-secret <ClientSecret>
+      --robot-code <RobotCode> --allowed-users <dt_staffId> [选项]
+      添加钉钉企业内部应用机器人，使用 Stream 模式收消息。
+
+  botmux setup add --platform wecom --app-id <本地唯一ID> --app-secret <Secret>
+      --corp-id <CorpID> --agent-id <AgentId> --callback-token <Token>
+      --encoding-aes-key <43字符Key> --callback-port <port>
+      --allowed-users <ww_UserID> [选项]
+      添加企业微信自建应用；回调路径默认 /wecom/callback，需要公网 HTTPS 反代。
 
   botmux setup configure <进程名|AppID> [--switch-account] [--json]
       对已添加的机器人重跑开放平台权限、长连接事件、redirect 与发版。
@@ -140,6 +174,15 @@ export const SETUP_CLI_USAGE = `botmux setup — 脚本化（非 TUI）用法
   --allowed-chat-groups <g>  可对话群 chat_id（oc_xxx，逗号分隔）
   --show-in-team <bool>      平台团队页是否展示（默认 true）
   --brand <feishu|lark>      租户类型（仅 add）
+  --platform <platform>      IM 平台：feishu | lark | dingtalk | wecom
+  --robot-code <code>        钉钉机器人 RobotCode
+  --corp-id <id>             企业微信 CorpID
+  --agent-id <id>            企业微信自建应用 AgentId
+  --callback-token <token>   企业微信回调 Token
+  --encoding-aes-key <key>   企业微信回调 EncodingAESKey（43 字符）
+  --callback-host <host>     企业微信回调监听地址（默认 0.0.0.0）
+  --callback-port <port>     企业微信回调监听端口
+  --callback-path <path>     企业微信回调路径（默认 /wecom/callback）
 
 通用选项：
   --json                     输出机器可读 JSON（含 ok / error 字段）
@@ -255,6 +298,13 @@ export function parseSetupCommand(argv: string[]): SetupCommand {
     if (compatibilityMode && flags.appName?.trim()) {
       throw new Error('兼容模式不支持 --app-name；请移除该参数，应用名称将由平台决定。');
     }
+    const platform = flags.platform?.trim().toLowerCase();
+    if (createApp && platform && platform !== 'feishu' && platform !== 'lark') {
+      throw new Error('--create-app 仅支持 feishu/lark；钉钉和企业微信请使用已有应用凭证。');
+    }
+    if (openPlatformAutoSpecified && platform && platform !== 'feishu' && platform !== 'lark') {
+      throw new Error('--open-platform-auto 仅支持 feishu/lark。');
+    }
     return {
       action: 'add',
       json,
@@ -314,9 +364,23 @@ export function buildBotFromAddFlags(flags: SetupBotFlags): Record<string, any> 
   if (!flags.allowedUsers?.trim()) missing.push('--allowed-users');
   if (missing.length > 0) throw new Error(`add 缺少必填参数: ${missing.join(' ')}`);
 
-  const brand = (flags.brand ?? 'feishu').trim().toLowerCase();
+  const explicitBrand = flags.brand?.trim().toLowerCase();
+  if (explicitBrand !== undefined && explicitBrand !== 'feishu' && explicitBrand !== 'lark') {
+    throw new Error(`--brand 必须是 feishu 或 lark: ${flags.brand}`);
+  }
+  const platform = (flags.platform ?? explicitBrand ?? 'feishu').trim().toLowerCase();
+  if (!['feishu', 'lark', 'dingtalk', 'wecom'].includes(platform)) {
+    throw new Error(`--platform 必须是 feishu、lark、dingtalk 或 wecom: ${flags.platform}`);
+  }
+  const brand = explicitBrand ?? (platform === 'lark' ? 'lark' : 'feishu');
   if (brand !== 'feishu' && brand !== 'lark') {
     throw new Error(`--brand 必须是 feishu 或 lark: ${flags.brand}`);
+  }
+  if ((platform === 'dingtalk' || platform === 'wecom') && flags.brand !== undefined) {
+    throw new Error('--brand 仅适用于 feishu/lark。');
+  }
+  if ((platform === 'feishu' || platform === 'lark') && flags.brand !== undefined && brand !== platform) {
+    throw new Error('--platform 与 --brand 指向了不同的飞书区域。');
   }
 
   const sel = resolveCliSelection((flags.cli ?? 'claude-code').trim());
@@ -325,10 +389,54 @@ export function buildBotFromAddFlags(flags: SetupBotFlags): Record<string, any> 
     larkAppSecret: flags.appSecret!.trim(),
     cliId: sel.cliId,
     ...(sel.wrapperCli ? { wrapperCli: sel.wrapperCli } : {}),
+    ...(platform === 'dingtalk' || platform === 'wecom' ? { platform } : {}),
     // 与 TUI 同口径：feishu 不落 brand 字段，bots.json 保持干净。
-    ...(brand === 'lark' ? { brand: 'lark' } : {}),
+    ...(platform === 'lark' || brand === 'lark' ? { brand: 'lark' } : {}),
   };
+  if (platform === 'dingtalk') {
+    const robotCode = flags.robotCode?.trim();
+    if (!robotCode) throw new Error('dingtalk 缺少必填参数: --robot-code');
+    base.dingtalk = { robotCode };
+  }
+  if (platform === 'wecom') {
+    const missingWeCom: string[] = [];
+    if (!flags.corpId?.trim()) missingWeCom.push('--corp-id');
+    if (!flags.agentId?.trim()) missingWeCom.push('--agent-id');
+    if (!flags.callbackToken?.trim()) missingWeCom.push('--callback-token');
+    if (!flags.encodingAesKey?.trim()) missingWeCom.push('--encoding-aes-key');
+    if (!flags.callbackPort?.trim()) missingWeCom.push('--callback-port');
+    if (missingWeCom.length > 0) {
+      throw new Error(`wecom 缺少必填参数: ${missingWeCom.join(' ')}`);
+    }
+    const agentId = Number(flags.agentId);
+    const callbackPort = Number(flags.callbackPort);
+    if (!Number.isInteger(agentId) || agentId <= 0) {
+      throw new Error('--agent-id 必须是正整数');
+    }
+    if (!Number.isInteger(callbackPort) || callbackPort < 1 || callbackPort > 65535) {
+      throw new Error('--callback-port 必须是 1-65535 的整数');
+    }
+    if (flags.encodingAesKey!.trim().length !== 43) {
+      throw new Error('--encoding-aes-key 必须正好 43 个字符');
+    }
+    base.wecom = {
+      corpId: flags.corpId!.trim(),
+      agentId,
+      token: flags.callbackToken!.trim(),
+      encodingAesKey: flags.encodingAesKey!.trim(),
+      callbackPort,
+      ...(flags.callbackHost?.trim() ? { callbackHost: flags.callbackHost.trim() } : {}),
+      ...(flags.callbackPath?.trim() ? { callbackPath: flags.callbackPath.trim() } : {}),
+    };
+  }
 
+  const externalPlatform = platform === 'dingtalk' || platform === 'wecom';
+  const externalDefaultWorkingDir = externalPlatform
+    ? flags.defaultWorkingDir ?? flags.workingDir?.split(',')[0]?.trim() ?? '~'
+    : flags.defaultWorkingDir;
+  if (externalPlatform && externalDefaultWorkingDir === '-') {
+    throw new Error(`${platform} 当前不支持仓库选择卡片，--default-working-dir 不能清空`);
+  }
   const input: BotConfigEditInput = {
     name: flags.name,
     cliRuntime: parseCliRuntimeFlag(flags.cliRuntime),
@@ -337,8 +445,8 @@ export function buildBotFromAddFlags(flags: SetupBotFlags): Record<string, any> 
     backendType: flags.backend,
     // 固定默认目录模式（只给 --default-working-dir）不强写 workingDir，
     // 扫描根回退默认 ~；其余情况与 TUI 一致，总是落 workingDir（留空 → '~'）。
-    workingDir: flags.workingDir ?? (flags.defaultWorkingDir ? undefined : '~'),
-    defaultWorkingDir: flags.defaultWorkingDir,
+    workingDir: flags.workingDir ?? (externalDefaultWorkingDir ? undefined : '~'),
+    defaultWorkingDir: externalDefaultWorkingDir,
     allowedUsers: flags.allowedUsers,
     allowedChatGroups: flags.allowedChatGroups,
     showInTeam: flags.showInTeam,
@@ -347,7 +455,7 @@ export function buildBotFromAddFlags(flags: SetupBotFlags): Record<string, any> 
   };
   const bot = applyBotConfigEdits(base, input);
   if (!hasOwnerEntry(bot.allowedUsers)) {
-    throw new Error('--allowed-users 至少需要一个完整邮箱、手机号（大陆号直填，海外带 + 区号）、union_id（on_xxx）或 open_id（ou_xxx）作为 owner。');
+    throw new Error('--allowed-users 至少需要一个完整邮箱、手机号、飞书身份 ID，或平台用户 ID（dt_xxx / ww_xxx）作为 owner。');
   }
   assertOwnerWhenChatGroups(bot);
   return bot;
@@ -363,6 +471,21 @@ export function editInputFromFlags(flags: SetupBotFlags): BotConfigEditInput {
   }
   if (flags.brand !== undefined) {
     throw new Error('--brand 仅在 add 时可指定（brand 绑定租户域名，换租户请 remove 后重新 add）。');
+  }
+  const platformOnlyFlags: Array<[keyof SetupBotFlags, string]> = [
+    ['platform', '--platform'],
+    ['robotCode', '--robot-code'],
+    ['corpId', '--corp-id'],
+    ['agentId', '--agent-id'],
+    ['callbackToken', '--callback-token'],
+    ['encodingAesKey', '--encoding-aes-key'],
+    ['callbackHost', '--callback-host'],
+    ['callbackPort', '--callback-port'],
+    ['callbackPath', '--callback-path'],
+  ];
+  const unsupported = platformOnlyFlags.find(([key]) => flags[key] !== undefined);
+  if (unsupported) {
+    throw new Error(`${unsupported[1]} 仅在 add 时可指定；切换 IM 平台请 remove 后重新 add。`);
   }
   const input: BotConfigEditInput = {};
   if (flags.name !== undefined) input.name = flags.name;

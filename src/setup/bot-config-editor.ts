@@ -129,6 +129,7 @@ const FULL_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  * 允许中间出现空格/连字符，判定前先归一化掉。
  */
 const MOBILE_RE = /^(?:\+\d{6,15}|1\d{10})$/;
+const EXTERNAL_IM_USER_RE = /^(?:dt|ww)_[A-Za-z0-9._:+-]+$/;
 
 /** 去掉手机号里的空格与连字符（用户可能填 "+86 130-1111-2222"），便于校验/解析。 */
 export function normalizeMobileEntry(entry: string): string {
@@ -189,7 +190,11 @@ export function entryNeedsContactResolve(entry: string): boolean {
  */
 export function isValidAllowedUserEntry(entry: string): boolean {
   const s = entry.trim();
-  return s.startsWith('ou_') || s.startsWith('on_') || FULL_EMAIL_RE.test(s) || isMobileEntry(s);
+  return s.startsWith('ou_')
+    || s.startsWith('on_')
+    || EXTERNAL_IM_USER_RE.test(s)
+    || FULL_EMAIL_RE.test(s)
+    || isMobileEntry(s);
 }
 
 /** 返回非法的 allowedUsers 条目（既不是 ou_ 也不是完整邮箱，典型是裸邮箱前缀）。 */
@@ -479,6 +484,9 @@ export const CLONE_EXCLUDED_KEYS = [
 export const CLONE_IDENTITY_KEYS = [
   'larkAppId',
   'larkAppSecret',
+  'platform',
+  'dingtalk',
+  'wecom',
   'brand',
   'allowedUsers',
   'ownerOpenId',
@@ -649,7 +657,7 @@ export function applyBotConfigEdits<T extends Record<string, any>>(
       const invalid = findInvalidAllowedUserEntries(entries);
       if (invalid.length > 0) {
         throw new Error(
-          `allowedUsers 条目必须是完整邮箱（如 alice@example.com）、手机号（大陆号直填 11 位，海外号带 + 区号）、union_id（on_xxx）或 open_id（ou_xxx），不能是邮箱前缀: ${invalid.join(', ')}`,
+          `allowedUsers 条目必须是完整邮箱、手机号、飞书 union/open_id，或钉钉/企微用户 ID（dt_xxx / ww_xxx）: ${invalid.join(', ')}`,
         );
       }
       out.allowedUsers = entries;

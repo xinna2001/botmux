@@ -63,5 +63,33 @@
     },
     "allowedUsers": ["grace@company.com"],
     "workingDir": "~/projects"
+  },
+  {
+    "platform": "dingtalk",
+    "larkAppId": "your_dingtalk_client_id",
+    "larkAppSecret": "your_dingtalk_client_secret",
+    "dingtalk": {
+      "robotCode": "your_dingtalk_robot_code"
+    },
+    "cliId": "claude-code",
+    "allowedUsers": ["dt_owner_staff_id"],
+    "defaultWorkingDir": "~/projects"
+  },
+  {
+    "platform": "wecom",
+    "larkAppId": "wecom-agent-1000002",
+    "larkAppSecret": "your_wecom_app_secret",
+    "wecom": {
+      "corpId": "your_corp_id",
+      "agentId": 1000002,
+      "token": "your_callback_token",
+      "encodingAesKey": "your_43_character_encoding_aes_key_here_xxx",
+      "callbackHost": "127.0.0.1",
+      "callbackPort": 8788,
+      "callbackPath": "/wecom/callback"
+    },
+    "cliId": "claude-code",
+    "allowedUsers": ["ww_owner_user_id"],
+    "defaultWorkingDir": "~/projects"
   }
 ]

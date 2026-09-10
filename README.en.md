@@ -26,7 +26,9 @@
 
 ---
 
-A daemon watches Lark messages and spawns an isolated session process for each new session, streaming the AI coding CLI / agent's output back as live Lark cards and offering an interactive web terminal. It **doesn't reimplement agent capabilities** — it bridges the tools you already use directly (**20+ CLI / agent adapters**, see [Supported CLIs & Agents](#supported-clis--agents)).
+A daemon watches IM messages and spawns an isolated session process for each new session, streaming the AI coding CLI / agent's output back to the chat and offering an interactive web terminal. It **doesn't reimplement agent capabilities** — it bridges the tools you already use directly (**20+ CLI / agent adapters**, see [Supported CLIs & Agents](#supported-clis--agents)).
+
+Experimental text connectors are available for DingTalk Stream and WeCom self-built applications. Feishu/Lark retains the full card and thread experience; other platforms degrade according to the [multi-IM capability matrix](docs/multi-im-connectors.md).
 
 ## What it solves
 

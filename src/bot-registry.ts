@@ -19,6 +19,8 @@ import { normalizePricingOverrides } from './services/model-pricing.js';
 import { parseTriggerUserAuthConfig } from './services/trigger-user-auth.js';
 import { parseBudgetConfig } from './services/budget-tracker.js';
 import { type Brand, sdkDomain, normalizeBrand } from './im/lark/lark-hosts.js';
+import { isLarkPlatform } from './im/platform.js';
+import type { ImPlatform } from './im/types.js';
 import type { BotSkillPolicy, SkillSelector } from './core/skills/types.js';
 import { normalizeStartupCommandList } from './core/startup-commands.js';
 import { DAEMON_COMMANDS } from './core/passthrough-commands.js';
@@ -80,7 +82,7 @@ import {
  */
 export class LarkTransportDisabledError extends Error {
   constructor(larkAppId: string, op: string) {
-    super(`Feishu transport is disabled for core-only bot ${larkAppId} (attempted: ${op})`);
+    super(`Feishu/Lark transport is unavailable for bot ${larkAppId} (attempted: ${op})`);
     this.name = 'LarkTransportDisabledError';
   }
 }
@@ -1360,6 +1362,24 @@ export interface BotConfig {
   larkAppId: string;
   larkAppSecret: string;
   /**
+   * IM transport. Missing preserves the historical Feishu behavior; `brand`
+   * remains the Feishu/Lark regional selector for backward compatibility.
+   */
+  platform?: ImPlatform;
+  dingtalk?: {
+    /** Needed for proactive sends after the inbound session webhook expires. */
+    robotCode?: string;
+  };
+  wecom?: {
+    corpId: string;
+    agentId: number;
+    token: string;
+    encodingAesKey: string;
+    callbackHost?: string;
+    callbackPort: number;
+    callbackPath?: string;
+  };
+  /**
    * Core-only / headless 模式：该 bot 纯 HTTP 控制 API 驱动（trigger →
    * spawn → CLI → trigger-result），**不连接任何飞书**——boot 时跳过
    * open_id 探测、required-scope 校验、WSClient 事件订阅，也不投递飞书消息
@@ -2314,13 +2334,14 @@ const larkLogger = {
  * `vcMeetingAgent.enabled:true` + a stale on-disk runtime record).
  */
 export function vcMeetingAgentConfigActive(
-  cfg: Pick<BotConfig, 'apiOnly' | 'vcMeetingAgent'> | undefined,
+  cfg: Pick<BotConfig, 'apiOnly' | 'platform' | 'brand' | 'vcMeetingAgent'> | undefined,
 ): VcMeetingAgentConfig | undefined {
   if (!cfg) return undefined;
   // apiOnly (core-only) bots have no Feishu transport — a VC listener drives
   // `lark-cli vc +meeting-events --as bot`, which breaks the zero-Feishu-network
   // contract. This fail-close is the load-bearing invariant and must stay first.
   if (cfg.apiOnly === true) return undefined;
+  if (!isLarkPlatform(cfg)) return undefined;
   // Bot-agnostic join (2026-08): any invited bot should join, so VC is active by
   // default for every Feishu-connected bot. `vcMeetingAgent.enabled: false` is
   // the explicit per-bot opt-out; unset/absent now means active. A bot with no
@@ -2348,7 +2369,7 @@ export function registerBot(cfg: BotConfig): BotState {
   cfg.nativeSubagentRuntime = nativeSubagentRuntimeState.status === 'valid'
     ? nativeSubagentRuntimeState.policy
     : undefined;
-  // apiOnly (core-only) bots have NO Feishu credential (empty appSecret). The Lark
+  // apiOnly and non-Lark bots have no Feishu SDK client. The Lark
   // SDK Client ctor throws "appSecret or clientAssertionProvider is required" on an
   // empty secret, so constructing it would fatal the whole daemon at boot — the
   // exact failure riff hit in a clean sandbox. An apiOnly bot never uses the client
@@ -2357,7 +2378,7 @@ export function registerBot(cfg: BotConfig): BotState {
   // the whole contract.
   let client: Lark.Client | null = null;
   let uploadClient: Lark.Client | null = null;
-  if (cfg.apiOnly !== true) {
+  if (cfg.apiOnly !== true && isLarkPlatform(cfg)) {
     const clientParams = {
       appId: cfg.larkAppId,
       appSecret: cfg.larkAppSecret,
@@ -2434,7 +2455,7 @@ export function getBotClient(larkAppId: string): Lark.Client {
   // throwing here is the single authoritative gate no caller can bypass. A
   // correctly-built apiOnly flow never reaches this (session/CLI gates fire
   // first); reaching it is genuine misuse and must fail loud, not silently.
-  if (bot.config.apiOnly === true) {
+  if (bot.config.apiOnly === true || !isLarkPlatform(bot.config)) {
     throw new LarkTransportDisabledError(larkAppId, 'getBotClient');
   }
   // Non-apiOnly bots always have a constructed client (registerBot builds one for
@@ -2454,7 +2475,7 @@ export function getBotUploadClient(larkAppId: string): Lark.Client {
   // Same bot-level transport boundary as getBotClient: apiOnly (core-only) bots
   // make zero Feishu network calls, so they never have an upload client. Fail
   // loud rather than NPE deep in an SDK upload call.
-  if (bot.config.apiOnly === true) {
+  if (bot.config.apiOnly === true || !isLarkPlatform(bot.config)) {
     throw new LarkTransportDisabledError(larkAppId, 'getBotUploadClient');
   }
   // Non-apiOnly bots always have a constructed upload client (registerBot builds
@@ -2468,7 +2489,8 @@ export function getBotUploadClient(larkAppId: string): Lark.Client {
 
 /** Owner = bot 首个已授权 open_id，与「缺权限警告私信对象」同口径（见 admin 解析）。 */
 export function getOwnerOpenId(larkAppId: string): string | undefined {
-  return bots.get(larkAppId)?.resolvedAllowedUsers.find(u => u.startsWith('ou_'));
+  return bots.get(larkAppId)?.resolvedAllowedUsers.find(u =>
+    u.startsWith('ou_') || u.startsWith('dt_') || u.startsWith('ww_'));
 }
 
 /** Admins = all resolved allowedUsers, matching `/botconfig`'s permission model. */
@@ -3098,6 +3120,55 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     if (!entry.larkAppId || typeof entry.larkAppId !== 'string') {
       throw new Error(`Bot config [${i}]: larkAppId is required and must be a string`);
     }
+    const platform = entry.platform === undefined
+      ? undefined
+      : ['feishu', 'lark', 'dingtalk', 'wecom'].includes(entry.platform)
+        ? entry.platform as ImPlatform
+        : null;
+    if (platform === null) {
+      throw new Error(`Bot config [${i}]: platform must be feishu, lark, dingtalk, or wecom`);
+    }
+    if ((platform === 'dingtalk' || platform === 'wecom') && entry.brand !== undefined) {
+      throw new Error(`Bot config [${i}]: brand is only valid for feishu/lark`);
+    }
+    if (platform === 'feishu' && entry.brand === 'lark') {
+      throw new Error(`Bot config [${i}]: platform feishu conflicts with brand lark`);
+    }
+    if (platform === 'dingtalk') {
+      if (!entry.dingtalk || typeof entry.dingtalk !== 'object' || Array.isArray(entry.dingtalk)) {
+        throw new Error(`Bot config [${i}]: dingtalk config block is required`);
+      }
+      if (typeof entry.dingtalk.robotCode !== 'string' || !entry.dingtalk.robotCode.trim()) {
+        throw new Error(`Bot config [${i}]: dingtalk.robotCode is required`);
+      }
+    }
+    if (platform === 'wecom') {
+      const wecom = entry.wecom;
+      if (!wecom || typeof wecom !== 'object' || Array.isArray(wecom)) {
+        throw new Error(`Bot config [${i}]: wecom config block is required`);
+      }
+      if (typeof wecom.corpId !== 'string' || !wecom.corpId.trim()) {
+        throw new Error(`Bot config [${i}]: wecom.corpId is required`);
+      }
+      if (!Number.isInteger(wecom.agentId) || wecom.agentId <= 0) {
+        throw new Error(`Bot config [${i}]: wecom.agentId must be a positive integer`);
+      }
+      if (typeof wecom.token !== 'string' || !wecom.token.trim()) {
+        throw new Error(`Bot config [${i}]: wecom.token is required`);
+      }
+      if (typeof wecom.encodingAesKey !== 'string' || wecom.encodingAesKey.length !== 43) {
+        throw new Error(`Bot config [${i}]: wecom.encodingAesKey must be exactly 43 characters`);
+      }
+      if (!Number.isInteger(wecom.callbackPort) || wecom.callbackPort < 1 || wecom.callbackPort > 65535) {
+        throw new Error(`Bot config [${i}]: wecom.callbackPort must be an integer between 1 and 65535`);
+      }
+      if (wecom.callbackHost !== undefined && typeof wecom.callbackHost !== 'string') {
+        throw new Error(`Bot config [${i}]: wecom.callbackHost must be a string`);
+      }
+      if (wecom.callbackPath !== undefined && typeof wecom.callbackPath !== 'string') {
+        throw new Error(`Bot config [${i}]: wecom.callbackPath must be a string`);
+      }
+    }
     // Validate the `mojo` block through the SHARED normalizer, so a hand-edited
     // bots.json is held to exactly the same rules as `/config set mojo`.
     //
@@ -3482,6 +3553,27 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       // fall back to '' so downstream env plumbing stays a string. Feishu image
       // upload etc. already degrade gracefully on an empty secret.
       larkAppSecret: entry.larkAppSecret ?? '',
+      platform,
+      dingtalk: platform === 'dingtalk'
+        ? {
+            robotCode: entry.dingtalk.robotCode.trim(),
+          }
+        : undefined,
+      wecom: platform === 'wecom'
+        ? {
+            corpId: entry.wecom.corpId.trim(),
+            agentId: entry.wecom.agentId,
+            token: entry.wecom.token.trim(),
+            encodingAesKey: entry.wecom.encodingAesKey,
+            callbackHost: typeof entry.wecom.callbackHost === 'string' && entry.wecom.callbackHost.trim()
+              ? entry.wecom.callbackHost.trim()
+              : undefined,
+            callbackPort: entry.wecom.callbackPort,
+            callbackPath: typeof entry.wecom.callbackPath === 'string' && entry.wecom.callbackPath.trim()
+              ? entry.wecom.callbackPath.trim()
+              : undefined,
+          }
+        : undefined,
       apiOnly: entry.apiOnly === true || undefined,
       feedback: entry.feedback === undefined
         ? undefined
@@ -3492,7 +3584,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       feedbackWebhooks: normalizeFeedbackWebhookConfig(entry.feedbackWebhooks),
       // brand：只认精确的 'lark'，其余 → undefined（下游 normalizeBrand 当
       // feishu）。feishu 故意存成 undefined，保持旧 bots.json 干净、不写死字段。
-      brand: entry.brand === 'lark' ? 'lark' : undefined,
+      brand: entry.brand === 'lark' || platform === 'lark' ? 'lark' : undefined,
       cardActionAckTimeoutMs: normalizeCardActionAckTimeoutMs(entry.cardActionAckTimeoutMs),
       name: typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim() : undefined,
       displayName: typeof entry.displayName === 'string' && entry.displayName.trim() ? entry.displayName.trim() : undefined,
@@ -3570,7 +3662,10 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       // Only a well-formed native open_id is trusted; anything else (stray on_/
       // email/garbage) is dropped so the fail-safe recipient can never be a
       // value that itself needs resolving.
-      ownerOpenId: typeof entry.ownerOpenId === 'string' && entry.ownerOpenId.startsWith('ou_')
+      ownerOpenId: typeof entry.ownerOpenId === 'string'
+        && (entry.ownerOpenId.startsWith('ou_')
+          || entry.ownerOpenId.startsWith('dt_')
+          || entry.ownerOpenId.startsWith('ww_'))
         ? entry.ownerOpenId
         : undefined,
       allowedChatGroups,
@@ -3579,7 +3674,11 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       defaultOncallAutoboundChats,
       defaultWorkingDir: typeof entry.defaultWorkingDir === 'string' && entry.defaultWorkingDir.trim()
         ? entry.defaultWorkingDir.trim()
-        : undefined,
+        : platform === 'dingtalk' || platform === 'wecom'
+          ? workingDirs?.[0] ?? (typeof entry.workingDir === 'string' && entry.workingDir.trim()
+              ? entry.workingDir.trim()
+              : '~')
+          : undefined,
       // Only meaningful alongside defaultWorkingDir (仅默认目录 mode); only explicit
       // true is persisted (undefined = off) so bots.json stays clean.
       defaultWorkingDirAutoWorktree: entry.defaultWorkingDirAutoWorktree === true || undefined,

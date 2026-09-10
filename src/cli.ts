@@ -109,6 +109,11 @@ import { buildPreset, serializePreset, presetFilename } from './setup/agent-pres
 import bundledScopeManifest from './setup/lark-scopes.json' with { type: 'json' };
 import type { CliId } from './adapters/cli/types.js';
 import type { CodexAppDispatchLedgerEntry } from './types.js';
+import { isLarkPlatform, resolveImPlatform } from './im/platform.js';
+import {
+  validateExternalImCredentials,
+  type ConnectorBotConfig,
+} from './im/connector-factory.js';
 import {
   validateCodexAppManagedSendOrigin,
 } from './utils/codex-app-dispatch-ledger.js';
@@ -1538,10 +1543,18 @@ function invalidBotDirs(bot: Record<string, any>): string[] {
 
 /** list/add/edit 的 JSON 输出视图：bot 条目 + 进程名，secret 脱敏（stdout 可能被贴进聊天/日志）。 */
 function botJsonView(bot: Record<string, any>, index: number): Record<string, any> {
+  const wecom = bot?.wecom && typeof bot.wecom === 'object'
+    ? {
+        ...bot.wecom,
+        token: maskAppSecret(bot.wecom.token),
+        encodingAesKey: maskAppSecret(bot.wecom.encodingAesKey),
+      }
+    : bot?.wecom;
   return {
     processName: botProcessName(bot, index, PM2_NAME),
     ...bot,
     larkAppSecret: maskAppSecret(bot?.larkAppSecret),
+    ...(wecom ? { wecom } : {}),
   };
 }
 
@@ -1592,6 +1605,30 @@ async function cmdSetupScripted(
     }
     const bot = bots[index];
     const processName = botProcessName(bot, index, PM2_NAME);
+    if (!isLarkPlatform(bot)) {
+      const validation = await validateExternalImCredentials(bot as ConnectorBotConfig);
+      if (!validation.ok) {
+        failSetupScripted(cmd.json, `${resolveImPlatform(bot)} 凭证校验失败: ${validation.message}`);
+        return;
+      }
+      const live = await ensureBotDaemonStarted(bot.larkAppId, { quiet: cmd.json });
+      const next = live.ok ? 'live' : (live.reason === 'fleet_down' ? 'botmux start' : 'botmux restart');
+      if (cmd.json) {
+        console.log(JSON.stringify({
+          ok: true,
+          action: 'configure',
+          bot: botJsonView(bot, index),
+          appId: bot.larkAppId,
+          platform: resolveImPlatform(bot),
+          live,
+          next,
+        }, null, 2));
+      } else {
+        console.log(`✅ 已验证 ${processName} 的 ${resolveImPlatform(bot)} 凭证`);
+        console.log(live.ok ? `✅ 已自动上线（${live.processName}）` : `下一步: ${next}`);
+      }
+      return;
+    }
     const openPlatform = await finishOpenPlatformSetup(bot.larkAppId, botBrand(bot), {
       // Machine-readable callers must never be surprised by an interactive QR.
       reuseOnly: cmd.json && !cmd.switchAccount,
@@ -1646,6 +1683,7 @@ async function cmdSetupScripted(
     let createdAppId: string | undefined;
     let createdAppName: string | undefined;
     const requestedBrand = normalizeBrand(cmd.flags.brand);
+    const requestedPlatform = (cmd.flags.platform ?? requestedBrand).trim().toLowerCase();
     if (!existsSync(BOTS_JSON_FILE) && existsSync(ENV_FILE)) {
       const legacy = parseDotEnvToBotConfig();
       if (legacy.larkAppId && legacy.larkAppSecret) {
@@ -1674,6 +1712,7 @@ async function cmdSetupScripted(
           // A deliberate account/platform switch may create under another
           // developer tenant, where the source app's union_id is not stable.
           // Require an explicit target-account identity before creating.
+          if (requestedPlatform !== 'feishu' && requestedPlatform !== 'lark') return undefined;
           if (cmd.switchAccount || cmd.compatibilityMode || botBrand(sourceBot) !== requestedBrand) {
             return undefined;
           }
@@ -1849,16 +1888,20 @@ async function cmdSetupScripted(
       return;
     }
 
-    // 凭证校验与 TUI 同口径：换不到 tenant_access_token 一律不写盘。
-    const { validateCredentials } = await import('./setup/verify-permissions.js');
-    const v = await validateCredentials(bot.larkAppId, bot.larkAppSecret, botBrand(bot));
+    // Validate against the selected provider before writing credentials.
+    const v = isLarkPlatform(bot)
+      ? await (async () => {
+          const { validateCredentials } = await import('./setup/verify-permissions.js');
+          return validateCredentials(bot.larkAppId, bot.larkAppSecret, botBrand(bot));
+        })()
+      : await validateExternalImCredentials(bot as ConnectorBotConfig);
     if (!v.ok) {
       const continueCommand = createdAppId
         ? setupAddContinuationCommand(createdAppId, botBrand(bot))
         : undefined;
       failSetupScripted(
         cmd.json,
-        `凭证校验失败 (${v.error}): ${v.message}${createdAppId ? `；应用 ${createdAppId} 已创建，未重复创建。请运行 ${continueCommand} 继续。` : ''}`,
+        `凭证校验失败${'error' in v ? ` (${v.error})` : ''}: ${v.message}${createdAppId ? `；应用 ${createdAppId} 已创建，未重复创建。请运行 ${continueCommand} 继续。` : ''}`,
         createdAppId ? { partial: true, appId: createdAppId, ...(createdAppName ? { appName: createdAppName } : {}), continueCommand } : {},
       );
       return;
@@ -1869,12 +1912,14 @@ async function cmdSetupScripted(
     // the wrong app, so canTalk/canOperate can never match it in the new bot.
     // Match Dashboard onboarding: reject only identities the target app can
     // definitively prove unusable; transient/scope failures remain inconclusive.
-    const unusableOwners = await detectUnusableOwnerEntries(
-      bot.larkAppId,
-      bot.larkAppSecret,
-      botBrand(bot),
-      bot.allowedUsers ?? [],
-    );
+    const unusableOwners = isLarkPlatform(bot)
+      ? await detectUnusableOwnerEntries(
+          bot.larkAppId,
+          bot.larkAppSecret,
+          botBrand(bot),
+          bot.allowedUsers ?? [],
+        )
+      : [];
     if (unusableOwners.length > 0) {
       const continueCommand = createdAppId
         ? setupAddContinuationCommand(createdAppId, botBrand(bot), '<OWNER_EMAIL_OR_UNION_ID>')
@@ -1984,7 +2029,7 @@ async function cmdSetupScripted(
       console.log(`✅ 已添加机器人 ${botProcessName(bot, index, PM2_NAME)} (${bot.larkAppId})，共 ${index + 1} 个`);
       console.log(`   配置文件: ${BOTS_JSON_FILE}`);
       if (migratedEnv) console.log(`   旧 .env 已迁移并备份: ${ENV_FILE}.bak`);
-      if (!cmd.openPlatformAuto) {
+      if (!cmd.openPlatformAuto && isLarkPlatform(bot)) {
         console.log('   已跳过开放平台自动配置（权限导入/发版）。需要时加 --open-platform-auto（要扫码），或运行交互式 botmux setup。');
       }
       if (live.ok) {
@@ -2067,10 +2112,17 @@ async function cmdSetupScripted(
       return;
     }
     if (appIdChanged || edited.larkAppSecret !== original.larkAppSecret) {
-      const { validateCredentials } = await import('./setup/verify-permissions.js');
-      const v = await validateCredentials(edited.larkAppId, edited.larkAppSecret, botBrand(edited));
+      const v = isLarkPlatform(edited)
+        ? await (async () => {
+            const { validateCredentials } = await import('./setup/verify-permissions.js');
+            return validateCredentials(edited.larkAppId, edited.larkAppSecret, botBrand(edited));
+          })()
+        : await validateExternalImCredentials(edited as ConnectorBotConfig);
       if (!v.ok) {
-        failSetupScripted(cmd.json, `凭证校验失败 (${v.error}): ${v.message}。配置未修改。`);
+        failSetupScripted(
+          cmd.json,
+          `凭证校验失败${'error' in v ? ` (${v.error})` : ''}: ${v.message}。配置未修改。`,
+        );
         return;
       }
     }
@@ -8063,7 +8115,23 @@ async function registerSelfFromCredFile(): Promise<void> {
   const sd = process.env.SESSION_DATA_DIR;
   if (!appId || !sd) return;
   const { sendCredFilePath } = await import('./adapters/cli/read-isolation.js');
-  let cred: { larkAppSecret?: string; brand?: string; apiOnly?: boolean; feedback?: import('./services/feedback-policy.js').FeedbackPolicyInput };
+  let cred: {
+    larkAppSecret?: string;
+    brand?: string;
+    platform?: import('./im/types.js').ImPlatform;
+    dingtalk?: { robotCode?: string };
+    wecom?: {
+      corpId: string;
+      agentId: number;
+      token: string;
+      encodingAesKey: string;
+      callbackHost?: string;
+      callbackPort: number;
+      callbackPath?: string;
+    };
+    apiOnly?: boolean;
+    feedback?: import('./services/feedback-policy.js').FeedbackPolicyInput;
+  };
   try {
     // send-cred lives in the bot's BOT_HOME (<BOTMUX_HOME>/bots/<appId>/send-cred.json);
     // sendCredFilePath takes SESSION_DATA_DIR and derives BOTMUX_HOME (its parent).
@@ -8083,6 +8151,9 @@ async function registerSelfFromCredFile(): Promise<void> {
     apiOnly: cred.apiOnly === true || undefined,
     cliId: 'claude-code',
     brand: cred.brand as 'feishu' | 'lark' | undefined,
+    platform: cred.platform,
+    dingtalk: cred.dingtalk,
+    wecom: cred.wecom,
     feedback: cred.feedback,
     replyStyle: resolveReplyStyleConfig(appId),
     usageDisplay:

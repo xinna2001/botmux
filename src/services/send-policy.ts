@@ -211,13 +211,15 @@ export function classifyMentionIdentifiers(
   raw: RawMention[],
   allowArbitraryMention: boolean,
 ): MentionClassifyResult {
-  const openIdMentions = raw.filter(r => r.identifier.startsWith('ou_'));
-  const nonOpenId = raw.filter(r => !r.identifier.startsWith('ou_'));
+  const isNativeImId = (identifier: string): boolean =>
+    identifier.startsWith('ou_') || identifier.startsWith('dt_') || identifier.startsWith('ww_');
+  const openIdMentions = raw.filter(r => isNativeImId(r.identifier));
+  const nonOpenId = raw.filter(r => !isNativeImId(r.identifier));
   if (nonOpenId.length > 0 && !allowArbitraryMention) {
     return {
       ok: false,
       error:
-        `--mention 只接受字面 open_id（ou_…）；不支持用邮箱 @ 任意人。\n` +
+        `--mention 只接受平台原生用户 ID（ou_… / dt_… / ww_…）；不支持用邮箱 @ 任意人。\n` +
         `如需按完整邮箱/手机号/union_id @ 群内成员，请在该 bot 配置里设 allowArbitraryMention: true。\n` +
         `无法解析的项：${nonOpenId.map(r => r.identifier).join(', ')}`,
       openIdMentions,
