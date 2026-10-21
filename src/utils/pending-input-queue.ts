@@ -57,6 +57,10 @@ export interface PendingCliInput {
    *  session is NOT dropped (codex #776 round-8). The worker's CLI-exit carry
    *  predicate and pending-drop both honor it. */
   noReplay?: boolean;
+  /** Worker-authored continuation after a TraeX capacity model switch. It keeps
+   * the original turn id for reply attribution but is never merged with a
+   * later user input. */
+  traexAutoModelRecovery?: true;
   taskContinuation?: TaskContinuationDispatchMarker;
 }
 
@@ -116,6 +120,7 @@ export function mergeQueuedCliInput(
   if (tail.queueAfterActiveTurn || next.queueAfterActiveTurn
     || tail.dispatchAttempt !== undefined || next.dispatchAttempt !== undefined
     || tail.codexAppDispatchId || next.codexAppDispatchId
+    || tail.traexAutoModelRecovery || next.traexAutoModelRecovery
     || tail.queuedActivationToken || next.queuedActivationToken
     || tail.vcMeetingImTurnOrigin || next.vcMeetingImTurnOrigin
     || tail.codexAppInput || next.codexAppInput

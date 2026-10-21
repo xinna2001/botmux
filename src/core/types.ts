@@ -619,6 +619,8 @@ export interface DaemonSession {
   activeModel?: string;
   /** Latest reasoning effort reported by the live executor. */
   activeReasoningEffort?: string;
+  /** Undefined means no observation; null means native/default context. */
+  activeModelBackendVariant?: 'standard' | 'max' | null;
   /** Claude model fallback still in effect, reported by the worker from the
    *  session transcript. Mirrored to Session.modelFallback so a card rebuilt
    *  without a live worker keeps the notice. Unlike the other runtime facts it

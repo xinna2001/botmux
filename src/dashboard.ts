@@ -3019,7 +3019,13 @@ function configuredBrands(): Map<string, string | undefined> {
   return brandMapByAppId(loadBotConfigs);
 }
 
-function configuredBotAgentFields(): Map<string, { cliId?: string; cliRuntime?: BotConfig['cliRuntime']; cliPathOverride?: string; wrapperCli?: string; cliLaunchMode?: BotConfig['cliLaunchMode']; model?: string; modelBackendVariant?: BotConfig['modelBackendVariant']; reasoningEffort?: BotConfig['reasoningEffort']; serviceTier?: BotConfig['serviceTier']; nativeSubagentRuntime?: BotConfig['nativeSubagentRuntime']; turnTimeoutMs?: number; dshRuntime?: BotConfig['dshRuntime']; dshProfile?: string; cliConfigDir?: string }> {
+type ConfiguredBotAgentFields = Partial<Pick<BotConfig,
+  'cliRuntime' | 'cliPathOverride' | 'wrapperCli' | 'cliLaunchMode' | 'model'
+  | 'modelBackendVariant' | 'reasoningEffort' | 'serviceTier' | 'nativeSubagentRuntime'
+  | 'traexAutoModel' | 'turnTimeoutMs' | 'dshRuntime' | 'dshProfile' | 'cliConfigDir'
+>> & { cliId?: string };
+
+function configuredBotAgentFields(): Map<string, ConfiguredBotAgentFields> {
   try {
     return new Map(loadBotConfigs().map(b => [b.larkAppId, {
       cliId: b.cliId,
@@ -3031,6 +3037,7 @@ function configuredBotAgentFields(): Map<string, { cliId?: string; cliRuntime?: 
       wrapperCli: b.wrapperCli,
       cliLaunchMode: b.cliLaunchMode,
       model: b.model,
+      traexAutoModel: b.traexAutoModel,
       modelBackendVariant: b.modelBackendVariant,
       reasoningEffort: b.reasoningEffort,
       serviceTier: b.serviceTier,
@@ -3081,6 +3088,7 @@ async function configuredBotDefaultsRecoveryRows(
           wrapperCli: bot.wrapperCli,
           cliLaunchMode: bot.cliLaunchMode,
           model: bot.model,
+          traexAutoModel: bot.traexAutoModel,
           modelBackendVariant: bot.modelBackendVariant,
           reasoningEffort: bot.reasoningEffort,
           serviceTier: bot.serviceTier,
@@ -3110,12 +3118,12 @@ async function configuredBotDefaultsRecoveryRows(
   }
 }
 
-function withConfiguredCliId<T extends { larkAppId: string; cliId?: string; cliRuntime?: BotConfig['cliRuntime']; cliPathOverride?: string; wrapperCli?: string; cliLaunchMode?: BotConfig['cliLaunchMode']; model?: string; modelBackendVariant?: BotConfig['modelBackendVariant']; reasoningEffort?: BotConfig['reasoningEffort']; serviceTier?: BotConfig['serviceTier']; nativeSubagentRuntime?: BotConfig['nativeSubagentRuntime']; turnTimeoutMs?: number; dshRuntime?: BotConfig['dshRuntime']; dshProfile?: string; cliConfigDir?: string }>(
+function withConfiguredCliId<T extends { larkAppId: string } & ConfiguredBotAgentFields>(
   bot: T,
-  ids: Map<string, string> | Map<string, { cliId?: string; cliRuntime?: BotConfig['cliRuntime']; cliPathOverride?: string; wrapperCli?: string; cliLaunchMode?: BotConfig['cliLaunchMode']; model?: string; modelBackendVariant?: BotConfig['modelBackendVariant']; reasoningEffort?: BotConfig['reasoningEffort']; serviceTier?: BotConfig['serviceTier'] }>,
-): T & { cliId?: string; cliRuntime?: BotConfig['cliRuntime']; cliPathOverride?: string; wrapperCli?: string; cliLaunchMode?: BotConfig['cliLaunchMode']; model?: string; modelBackendVariant?: BotConfig['modelBackendVariant']; reasoningEffort?: BotConfig['reasoningEffort']; serviceTier?: BotConfig['serviceTier']; nativeSubagentRuntime?: BotConfig['nativeSubagentRuntime']; turnTimeoutMs?: number; dshRuntime?: BotConfig['dshRuntime']; dshProfile?: string; cliConfigDir?: string } {
+  ids: Map<string, string> | Map<string, ConfiguredBotAgentFields>,
+): T & ConfiguredBotAgentFields {
   const raw = ids.get(bot.larkAppId);
-  const fallback: { cliId?: string; cliRuntime?: BotConfig['cliRuntime']; cliPathOverride?: string; wrapperCli?: string; cliLaunchMode?: BotConfig['cliLaunchMode']; model?: string; modelBackendVariant?: BotConfig['modelBackendVariant']; reasoningEffort?: BotConfig['reasoningEffort']; serviceTier?: BotConfig['serviceTier']; nativeSubagentRuntime?: BotConfig['nativeSubagentRuntime']; turnTimeoutMs?: number; dshRuntime?: BotConfig['dshRuntime']; dshProfile?: string; cliConfigDir?: string } | undefined = typeof raw === 'string' ? { cliId: raw } : raw;
+  const fallback: ConfiguredBotAgentFields | undefined = typeof raw === 'string' ? { cliId: raw } : raw;
   return {
     ...bot,
     cliId: bot.cliId || fallback?.cliId,
@@ -3124,6 +3132,7 @@ function withConfiguredCliId<T extends { larkAppId: string; cliId?: string; cliR
     wrapperCli: bot.wrapperCli || fallback?.wrapperCli,
     cliLaunchMode: bot.cliLaunchMode || fallback?.cliLaunchMode,
     model: bot.model || fallback?.model,
+    traexAutoModel: bot.traexAutoModel ?? fallback?.traexAutoModel,
     modelBackendVariant: bot.modelBackendVariant ?? fallback?.modelBackendVariant,
     reasoningEffort: bot.reasoningEffort || fallback?.reasoningEffort,
     serviceTier: bot.serviceTier || fallback?.serviceTier,
@@ -7241,6 +7250,9 @@ const server = createServer(async (req, res) => {
               ? j.cliLaunchMode ?? undefined
               : d.cliLaunchMode,
             model: j.model || d.model,
+            traexAutoModel: Object.prototype.hasOwnProperty.call(j, 'traexAutoModel')
+              ? j.traexAutoModel ?? undefined
+              : d.traexAutoModel,
             modelBackendVariant: Object.prototype.hasOwnProperty.call(j, 'modelBackendVariant')
               ? j.modelBackendVariant ?? undefined
               : d.modelBackendVariant,
