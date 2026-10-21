@@ -89,6 +89,12 @@ import { CODEX_REASONING_EFFORTS, isBackendVariantCliId, isCodexReasoningEffort,
 import { lookupCliSelection } from '../../setup/cli-selection.js';
 import { cliSupportsConfigDir } from '../../core/cli-config-dir.js';
 import { fetchAgents } from './agents-api.js';
+import { normalizeTraexAutoModelConfig, resolveTraexAutoModelSettings } from '../../services/traex-auto-model.js';
+import { TraexAutoModelEditor } from './traex-auto-model-editor.js';
+import {
+  autoModelDraftFromConfig, readAutoModelDraft, writeAutoModelDraft, clearAutoModelDraft,
+  strongestTraexModelSettings, type TraexAutoModelDraft,
+} from './traex-auto-model-preferences.js';
 import { AGENT_SECTIONS } from '../agent-profiles-model.js';
 import { hashQueryParam } from './dashboard-routes.js';
 import {
@@ -2248,9 +2254,42 @@ export function BotAgentSection(props: {
   const { bot, cliState, patchBot } = props;
   const initialKey = agentSelectionKey(bot, props.sessionFallback);
   const runtimeConfigKey = JSON.stringify([bot.cliRuntime ?? null, bot.cliPathOverride ?? null]);
+  const autoConfigKey = JSON.stringify(bot.traexAutoModel ?? null);
+  const initialAutoDraft = useRef(selectedAgentCliId(initialKey) === 'traex'
+    ? readAutoModelDraft(bot.larkAppId) : undefined);
+  const autoDraftRef = useRef<TraexAutoModelDraft>(initialAutoDraft.current
+    ?? autoModelDraftFromConfig(bot.traexAutoModel, {
+      reasoningEffort: bot.reasoningEffort, modelBackendVariant: bot.modelBackendVariant ?? undefined,
+    }));
   const [cliKey, setCliKey] = useState(initialKey);
   const [cliSelectionTouched, setCliSelectionTouched] = useState(false);
-  const [model, setModel] = useState(typeof bot.model === 'string' ? bot.model : '');
+  const [model, setModel] = useState(autoDraftRef.current.enabled ? 'auto'
+    : initialAutoDraft.current && bot.model === 'auto' ? autoDraftRef.current.models[0] ?? ''
+      : typeof bot.model === 'string' ? bot.model : '');
+  const [autoModelEnabled, setAutoModelEnabled] = useState(autoDraftRef.current.enabled);
+  const [autoReselectPerTurn, setAutoReselectPerTurn] = useState(autoDraftRef.current.reselectPerTurn);
+  const [autoModelTouched, setAutoModelTouched] = useState(!!initialAutoDraft.current);
+  const [autoModels, setAutoModels] = useState(autoDraftRef.current.models);
+  const [autoModelSettings, setAutoModelSettings] = useState(autoDraftRef.current.modelSettings);
+  const [autoTimeoutSeconds, setAutoTimeoutSeconds] = useState(autoDraftRef.current.timeoutSeconds);
+  const [autoCooldownSeconds, setAutoCooldownSeconds] = useState(autoDraftRef.current.cooldownSeconds);
+  const [autoDraftStorageFailed, setAutoDraftStorageFailed] = useState(false);
+  const pendingAutoDefaults = useRef(new Set<string>());
+  function applyAutoDraft(draft: TraexAutoModelDraft) {
+    autoDraftRef.current = draft;
+    setAutoModelEnabled(draft.enabled);
+    setAutoReselectPerTurn(draft.reselectPerTurn);
+    setAutoModels(draft.models);
+    setAutoModelSettings(draft.modelSettings);
+    setAutoTimeoutSeconds(draft.timeoutSeconds);
+    setAutoCooldownSeconds(draft.cooldownSeconds);
+  }
+  function editAutoDraft(patch: Partial<TraexAutoModelDraft>) {
+    const next = { ...autoDraftRef.current, ...patch };
+    applyAutoDraft(next);
+    setAutoModelTouched(true);
+    setAutoDraftStorageFailed(!writeAutoModelDraft(bot.larkAppId, next));
+  }
   const [modelBackendVariant, setModelBackendVariant] = useState<'' | 'standard' | 'max'>(bot.modelBackendVariant ?? '');
   const [modelBackendVariantTouched, setModelBackendVariantTouched] = useState(false);
   const [reasoningEffort, setReasoningEffort] = useState<'' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'>(bot.reasoningEffort ?? '');
@@ -2292,10 +2331,24 @@ export function BotAgentSection(props: {
   useEffect(() => {
     setCliKey(agentSelectionKey(bot, props.sessionFallback));
     setCliSelectionTouched(false);
-    setModel(typeof bot.model === 'string' ? bot.model : '');
-    setModelBackendVariant(bot.modelBackendVariant ?? '');
+    const stored = selectedAgentCliId(agentSelectionKey(bot, props.sessionFallback)) === 'traex'
+      ? readAutoModelDraft(bot.larkAppId) : undefined;
+    const draft = stored ?? autoModelDraftFromConfig(bot.traexAutoModel, {
+      reasoningEffort: bot.reasoningEffort, modelBackendVariant: bot.modelBackendVariant ?? undefined,
+    });
+    applyAutoDraft(draft);
+    setModel(draft.enabled ? 'auto' : stored && bot.model === 'auto'
+      ? draft.models[0] ?? '' : typeof bot.model === 'string' ? bot.model : '');
+    setAutoModelTouched(!!stored);
+    setAutoDraftStorageFailed(false);
+    pendingAutoDefaults.current.clear();
+    setModelBackendVariant(stored && !draft.enabled
+      ? draft.modelSettings[draft.models[0] ?? '']?.modelBackendVariant ?? ''
+      : bot.modelBackendVariant ?? '');
     setModelBackendVariantTouched(false);
-    setReasoningEffort(bot.reasoningEffort ?? '');
+    setReasoningEffort(stored && !draft.enabled
+      ? draft.modelSettings[draft.models[0] ?? '']?.reasoningEffort ?? ''
+      : bot.reasoningEffort ?? '');
     setServiceTier(bot.serviceTier ?? '');
     setServiceTierTouched(false);
     setNativeModelMode(nativePolicyModeFrom(bot.nativeSubagentRuntime?.model));
@@ -2321,6 +2374,7 @@ export function BotAgentSection(props: {
     bot.cliId,
     bot.larkAppId,
     bot.model,
+    autoConfigKey,
     bot.modelBackendVariant,
     bot.reasoningEffort,
     bot.serviceTier,
@@ -2341,6 +2395,17 @@ export function BotAgentSection(props: {
   // live 探测当前 CLI 的可用模型（ttadk 网关项保持现状，只用静态建议列表）。
   const [detectedModels, setDetectedModels] = useState<Awaited<ReturnType<typeof fetchDetectedModels>>>(null);
   const [detectingModels, setDetectingModels] = useState(false);
+  useEffect(() => {
+    const current = autoDraftRef.current;
+    let settings = current.modelSettings;
+    for (const model of pendingAutoDefaults.current) {
+      const capability = detectedModels?.modelCapabilities?.find(entry => entry.slug.toLowerCase() === model.toLowerCase());
+      if (!capability) continue;
+      settings = { ...settings, [model]: strongestTraexModelSettings(model, capability) };
+      pendingAutoDefaults.current.delete(model);
+    }
+    if (settings !== current.modelSettings) editAutoDraft({ modelSettings: settings });
+  }, [detectedModels]);
   useEffect(() => {
     if (option?.gateway === 'ttadk') {
       setDetectedModels(null);
@@ -2405,6 +2470,10 @@ export function BotAgentSection(props: {
     if (!isBackendVariantCliId(selectedAgentCliId(nextKey))) {
       setModelBackendVariant('');
       setModelBackendVariantTouched(true);
+    }
+    if (autoModelEnabled && (selectedAgentCliId(nextKey) !== 'traex' || nextOption?.cliLaunchMode)) {
+      editAutoDraft({ enabled: false });
+      if (model === 'auto') setModel('');
     }
   }
 
@@ -2472,6 +2541,19 @@ export function BotAgentSection(props: {
     }
     const trimmedNativeModel = nativeModel.trim();
     const saveCliId = selectedAgentCliId(cliKey);
+    const autoConfig = normalizeTraexAutoModelConfig(autoModelEnabled ? {
+      enabled: true, models: autoModels, queueTimeoutMs: Number(autoTimeoutSeconds) * 1_000,
+      reselectPerTurn: autoReselectPerTurn,
+      switchCooldownMs: Number(autoCooldownSeconds) * 1_000,
+      modelSettings: Object.fromEntries(autoModels.filter(Boolean).map(model => [model,
+        resolveTraexAutoModelSettings({ enabled: true, models: autoModels, queueTimeoutMs: 30_000, modelSettings: autoModelSettings },
+          model, { reasoningEffort: reasoningEffort || undefined, modelBackendVariant: modelBackendVariant || undefined }),
+      ])),
+    } : null);
+    if (saveCliId === 'traex' && autoConfig.error) {
+      setAgentStatus({ text: `✗ ${tr('botDefaults.autoModelInvalid')}` });
+      return;
+    }
     if (saveCliId === 'traex') {
       const nextNativePolicyErrors: NativePolicyErrors = {
         model: nativeModelMode === 'custom' && !trimmedNativeModel ? tr('botDefaults.nativeSubagentModelRequired') : null,
@@ -2499,6 +2581,8 @@ export function BotAgentSection(props: {
         cliId: cliKey,
         ...(cliSelectionTouched ? { replaceCliSelection: true } : {}),
         model,
+        ...(saveCliId === 'traex' && (autoModelTouched || autoModelEnabled)
+          ? { traexAutoModel: autoConfig.config ?? null } : {}),
         ...(isBackendVariantCliId(saveCliId) && modelBackendVariantTouched ? { modelBackendVariant } : {}),
         reasoningEffort: cliSupportsReasoningEffort(cliKey) ? reasoningEffort : '',
         ...(serviceTierTouched && (saveCliId === 'codex' || saveCliId === 'codex-app')
@@ -2519,6 +2603,13 @@ export function BotAgentSection(props: {
       };
       const res = await sendJson('PUT', `/api/bots/${encodeURIComponent(bot.larkAppId)}/agent`, body);
       if (res.ok && res.body.ok) {
+        clearAutoModelDraft(bot.larkAppId);
+        setAutoModelTouched(false);
+        setAutoDraftStorageFailed(false);
+        applyAutoDraft(autoModelDraftFromConfig(res.body.traexAutoModel ?? undefined, {
+          reasoningEffort: res.body.reasoningEffort ?? undefined,
+          modelBackendVariant: res.body.modelBackendVariant ?? undefined,
+        }));
         const summary = parseAgentSwitchSummary(res.body);
         const closedCount = summary.closed;
         const residualCount = summary.residual;
@@ -2558,6 +2649,7 @@ export function BotAgentSection(props: {
           wrapperCli: res.body.wrapperCli ?? null,
           cliLaunchMode: res.body.cliLaunchMode ?? null,
           model: res.body.model ?? '',
+          traexAutoModel: res.body.traexAutoModel ?? undefined,
           modelBackendVariant: res.body.modelBackendVariant ?? undefined,
           reasoningEffort: res.body.reasoningEffort ?? undefined,
           serviceTier: res.body.serviceTier ?? undefined,
@@ -2946,8 +3038,8 @@ export function BotAgentSection(props: {
               key={cliKey}
               value={model}
               onChange={setModel}
-              options={modelCandidates}
-              disabled={agentBusy || modelDisabledByCli}
+              options={autoModelEnabled && selectedCliId === 'traex' ? ['auto', ...modelCandidates] : modelCandidates}
+              disabled={agentBusy || modelDisabledByCli || (selectedCliId === 'traex' && autoModelEnabled)}
               busy={detectingModels}
               dataInput="agentModel"
               ariaLabel={tr('botDefaults.agentModel')}
@@ -2962,6 +3054,54 @@ export function BotAgentSection(props: {
           </label>
         </div>
       )}
+      {selectedCliId === 'traex' && !bot.wrapperCli && !option?.cliLaunchMode ? (
+        <TraexAutoModelEditor enabled={autoModelEnabled} models={autoModels}
+          reselectPerTurn={autoReselectPerTurn}
+          onReselectPerTurn={enabled => editAutoDraft({ reselectPerTurn: enabled })}
+          modelSettings={autoModelSettings} capabilities={detectedModels?.modelCapabilities}
+          timeoutSeconds={autoTimeoutSeconds} cooldownSeconds={autoCooldownSeconds}
+          candidates={modelCandidates.filter(candidate => candidate.toLowerCase() !== 'auto')}
+          busy={agentBusy} onModels={models => {
+            const current = autoDraftRef.current;
+            const settings = Object.fromEntries(models.filter(Boolean).map(model => {
+              if (Object.prototype.hasOwnProperty.call(current.modelSettings, model)) return [model, current.modelSettings[model]];
+              const capability = detectedModels?.modelCapabilities?.find(entry => entry.slug.toLowerCase() === model.toLowerCase());
+              if (!capability) pendingAutoDefaults.current.add(model);
+              return [model, strongestTraexModelSettings(model, capability)];
+            }));
+            editAutoDraft({ models, modelSettings: settings });
+          }}
+          onSettings={(model, settings) => {
+            pendingAutoDefaults.current.delete(model);
+            editAutoDraft({ modelSettings: { ...autoDraftRef.current.modelSettings, [model]: settings } });
+          }}
+          onTimeout={seconds => editAutoDraft({ timeoutSeconds: seconds })}
+          onCooldown={seconds => editAutoDraft({ cooldownSeconds: seconds })}
+          dirty={autoModelTouched} storageFailed={autoDraftStorageFailed} saveStatus={agentStatus?.text}
+          onSave={() => void saveAgent()}
+          onEnabled={enabled => {
+            const current = autoDraftRef.current;
+            let nextModels = current.models;
+            let nextSettings = current.modelSettings;
+            if (enabled) {
+              if (autoModels.length === 0) {
+                const preferred = model && model !== 'auto' ? model : modelCandidates[0] ?? '';
+                nextModels = [preferred];
+                const capability = detectedModels?.modelCapabilities?.find(entry => entry.slug.toLowerCase() === preferred.toLowerCase());
+                if (preferred && !capability) pendingAutoDefaults.current.add(preferred);
+                nextSettings = preferred ? { [preferred]: strongestTraexModelSettings(preferred, capability) } : {};
+              }
+              setModel('auto');
+              setReasoningEffort('');
+            } else if (model === 'auto') {
+              setModel(autoModels[0] ?? '');
+              setReasoningEffort(autoModelSettings[autoModels[0] ?? '']?.reasoningEffort ?? '');
+              setModelBackendVariant(autoModelSettings[autoModels[0] ?? '']?.modelBackendVariant ?? '');
+              setModelBackendVariantTouched(true);
+            }
+            editAutoDraft({ enabled, models: nextModels, modelSettings: nextSettings });
+          }} />
+      ) : null}
       {cliSupportsConfigDir(selectedAgentCliId(cliKey)) && (
         <div className="bd-row">
           <label>
@@ -2980,7 +3120,7 @@ export function BotAgentSection(props: {
           </label>
         </div>
       )}
-      {isTraex && (
+      {isTraex && !autoModelEnabled && (
         <div className="bd-row">
           <div className="bd-field">
             <FieldTitle help={tr('botDefaults.agentModelBackendVariantHelp')}>{tr('botDefaults.agentModelBackendVariant')}</FieldTitle>
@@ -3108,7 +3248,7 @@ export function BotAgentSection(props: {
           </label>
         </div>
       )}
-      {isReasoningSelection && (
+      {isReasoningSelection && !(selectedCliId === 'traex' && autoModelEnabled) && (
         <div className="bd-row">
           <div className="bd-field">
             <FieldTitle help={tr('botDefaults.agentReasoningEffortHelp')}>{tr('botDefaults.agentReasoningEffort')}</FieldTitle>

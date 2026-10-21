@@ -499,6 +499,8 @@ import {
   writeNativeSubagentRuntimeResponseProof,
 } from './native-subagent-runtime-ipc-auth.js';
 import { normalizeNativeSubagentRuntimePolicy } from '../services/native-subagent-runtime-policy.js';
+import { normalizeTraexAutoModelConfig, TRAEX_AUTO_MODEL_ID } from '../services/traex-auto-model.js';
+import { detectModelCapabilitiesViaExec } from '../adapters/cli/model-catalog-json.js';
 import { normalizeSessionTitleSource, updateSessionTitle } from './session-title.js';
 import { requestAgentSessionRename } from './session-rename.js';
 import {
@@ -7686,6 +7688,7 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
   let reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | null = null;
   let serviceTier: CodexServiceTier | null = null;
   let nativeSubagentRuntime: BotConfig['nativeSubagentRuntime'] | null = null;
+  let traexAutoModel: BotConfig['traexAutoModel'] | null = null;
   // dsh runner turn timeout (ms). Only meaningful for the dsh adapter; exposed
   // so the dashboard can render the dsh-only field with its current value.
   let turnTimeoutMs: number | null = null;
@@ -7713,6 +7716,7 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
       : null;
     reasoningEffort = cfg.reasoningEffort ?? null;
     serviceTier = cfg.serviceTier ?? null;
+    traexAutoModel = cfg.traexAutoModel ?? null;
     const normalizedNativeSubagentRuntime = normalizeNativeSubagentRuntimePolicy(cfg.nativeSubagentRuntime);
     nativeSubagentRuntime = normalizedNativeSubagentRuntime.ok
       ? normalizedNativeSubagentRuntime.value ?? null
@@ -7806,6 +7810,7 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     reasoningEffort,
     serviceTier,
     nativeSubagentRuntime,
+    traexAutoModel,
     turnTimeoutMs,
     dshRuntime,
     agentSelectionKey,
@@ -8500,6 +8505,7 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
     reasoningEffort?: unknown;
     serviceTier?: unknown;
     nativeSubagentRuntime?: unknown;
+    traexAutoModel?: unknown;
     turnTimeoutMs?: unknown;
     cliRuntime?: unknown;
     dshRuntime?: unknown;
@@ -8521,6 +8527,11 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
   }
   const requestedSelection = selected;
   const model = typeof body.model === 'string' ? body.model.trim() : '';
+  const autoFieldPresent = Object.prototype.hasOwnProperty.call(body, 'traexAutoModel');
+  const requestedAuto = normalizeTraexAutoModelConfig(body.traexAutoModel);
+  if (selected.cliId === 'traex' && requestedAuto.error) {
+    return jsonRes(res, 400, { ok: false, error: 'invalid_traex_auto_model', message: requestedAuto.error });
+  }
   const modelBackendVariantFieldPresent = Object.prototype.hasOwnProperty.call(body, 'modelBackendVariant');
   let modelBackendVariant: 'standard' | 'max' | undefined;
   const supportsModelBackendVariant = isBackendVariantCliId(selected.cliId);
@@ -8667,6 +8678,7 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
       nextServiceTier?: CodexServiceTier;
       nextModelBackendVariant?: 'standard' | 'max';
       nextNativeSubagentRuntimeState?: NativeSubagentRuntimeConfigState;
+      nextTraexAutoModel?: BotConfig['traexAutoModel'];
     }>(larkAppId, async (entry) => {
       const runtimeFieldPresent = Object.prototype.hasOwnProperty.call(body, 'cliRuntime');
       const currentSelectionKey = selectionKeyForBot(entry.cliId, entry.wrapperCli, entry.cliLaunchMode);
@@ -8677,6 +8689,14 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
       selected = !selectionChanged && !runtimeFieldPresent
         ? { cliId: requestedSelection.cliId, wrapperCli: entry.wrapperCli, cliLaunchMode: entry.cliLaunchMode }
         : requestedSelection;
+      const nextTraexAutoModel = selected.cliId === 'traex'
+        ? (autoFieldPresent ? requestedAuto.config : normalizeTraexAutoModelConfig(entry.traexAutoModel).config)
+        : undefined;
+      if (selected.cliId === 'traex' && model.toLowerCase() === TRAEX_AUTO_MODEL_ID
+        && (!nextTraexAutoModel || selected.wrapperCli || selected.cliLaunchMode || entry.codexRpcInput)) {
+        return { write: false, result: { error: 'invalid_traex_auto_model',
+          message: 'Auto requires an enabled model pool and a directly managed TraeX terminal.' } };
+      }
       if (runtimeFieldPresent) {
         if (body.cliRuntime !== null) {
           if (selected.cliId !== 'codex') {
@@ -8773,6 +8793,29 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
         const tuiWarning = `配置已保存，但 dsh-tui 未安装（${dshTuiAvailability.reason ?? 'dsh-tui 二进制不在 PATH'}）。请在 daemon 所在机器安装 @deepseek-harness-tui/dsh-tui。`;
         availabilityWarning = availabilityWarning ? `${availabilityWarning} ${tuiWarning}` : tuiWarning;
       }
+      if (model.toLowerCase() === TRAEX_AUTO_MODEL_ID && nextTraexAutoModel?.modelSettings) {
+        const settingsEntries = Object.entries(nextTraexAutoModel.modelSettings)
+          .filter(([, settings]) => settings.reasoningEffort || settings.modelBackendVariant);
+        const catalog = settingsEntries.length ? await detectModelCapabilitiesViaExec(
+          availability.resolvedPath ?? effectivePath ?? 'traex',
+          { ...buildSessionChildEnv(process.env, entry.envPolicy), ...botInjectedEnv(entry.env, entry.envPolicy) },
+        ) : null;
+        for (const [modelId, settings] of settingsEntries) {
+          const capability = catalog?.find(item => item.slug.toLowerCase() === modelId.toLowerCase());
+          const variant = capability?.contextVariants?.find(item => item.id === settings.modelBackendVariant);
+          if (settings.modelBackendVariant && capability && !variant) {
+            return { write: false, result: { error: 'invalid_traex_auto_model',
+              message: `${modelId} 不支持所选上下文档位 ${settings.modelBackendVariant}` } };
+          }
+          const efforts = variant?.reasoningEfforts ?? capability?.reasoningEfforts;
+          if (settings.reasoningEffort && (efforts
+            ? !efforts.includes(settings.reasoningEffort)
+            : !cliModelSupportsReasoningEffort('traex', modelId, settings.reasoningEffort))) {
+            return { write: false, result: { error: 'invalid_traex_auto_model',
+              message: `${modelId} 不支持所选思考强度 ${settings.reasoningEffort}` } };
+          }
+        }
+      }
       const effectiveServiceTier = supportsServiceTier
         ? (serviceTierFieldPresent ? serviceTier ?? undefined : entry.serviceTier)
         : undefined;
@@ -8809,7 +8852,11 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
       const nextReasoningEffort = supportsReasoningEffort
         ? (reasoningEffortFieldPresent ? reasoningEffort ?? undefined : entry.reasoningEffort)
         : undefined;
-      if (nextReasoningEffort && !cliModelSupportsReasoningEffort(selected.cliId, model || undefined, nextReasoningEffort)) {
+      const effortModels = selected.cliId === 'traex' && model.toLowerCase() === TRAEX_AUTO_MODEL_ID
+        ? nextTraexAutoModel!.models : [model || undefined];
+      if (nextReasoningEffort && effortModels.some(candidate =>
+        !(candidate && nextTraexAutoModel?.modelSettings && Object.prototype.hasOwnProperty.call(nextTraexAutoModel.modelSettings, candidate)) &&
+        !cliModelSupportsReasoningEffort(selected.cliId, candidate, nextReasoningEffort))) {
         return { write: false, result: { error: 'reasoning_effort_not_supported_by_model' } };
       }
       const nextServiceTier = supportsServiceTier
@@ -8838,6 +8885,8 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
       }
       if (model) entry.model = model;
       else delete entry.model;
+      if (nextTraexAutoModel) entry.traexAutoModel = nextTraexAutoModel;
+      else delete entry.traexAutoModel;
       if (!supportsModelBackendVariant) delete entry.modelBackendVariant;
       else if (modelBackendVariantFieldPresent) {
         if (modelBackendVariant) entry.modelBackendVariant = modelBackendVariant;
@@ -8909,7 +8958,7 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
         // turn）。手动的 pty/tmux/herdr/zellij override 不受影响（它们不是远端后端）。
         delete entry.backendType;
       }
-      return { write: true, result: { nextReasoningEffort, nextServiceTier, nextModelBackendVariant, nextNativeSubagentRuntimeState } };
+      return { write: true, result: { nextReasoningEffort, nextServiceTier, nextModelBackendVariant, nextNativeSubagentRuntimeState, nextTraexAutoModel } };
     });
     if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
     if (r.result.error) {
@@ -8937,6 +8986,7 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
     else bot.config.wrapperCli = undefined;
     bot.config.cliLaunchMode = selected.cliLaunchMode;
     bot.config.model = model || undefined;
+    bot.config.traexAutoModel = r.result.nextTraexAutoModel;
     bot.config.modelBackendVariant = supportsModelBackendVariant
       ? r.result.nextModelBackendVariant
       : undefined;
@@ -8985,6 +9035,7 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
       reasoningEffort: supportsReasoningEffort ? bot.config.reasoningEffort ?? null : null,
       serviceTier: supportsServiceTier ? bot.config.serviceTier ?? null : null,
       nativeSubagentRuntime: bot.config.nativeSubagentRuntime ?? null,
+      traexAutoModel: bot.config.traexAutoModel ?? null,
       turnTimeoutMs: supportsTurnTimeout ? bot.config.turnTimeoutMs ?? null : null,
       dshRuntime: supportsDshRuntime ? bot.config.dshRuntime ?? null : null,
       dshProfile: supportsDshProfile ? bot.config.dshProfile ?? null : null,

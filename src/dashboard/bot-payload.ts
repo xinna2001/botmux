@@ -13,6 +13,7 @@ import type { NativeSubagentRuntimePolicy } from '../services/native-subagent-ru
 import type { CodexServiceTier } from '../services/codex-service-tier.js';
 import { normalizeQuotaFallbackBotConfig } from '../services/quota-fallback.js';
 import { normalizeEnvPolicy, type EnvPolicy } from '../core/env-policy.js';
+import type { TraexAutoModelConfig } from '../services/traex-auto-model.js';
 
 /** Shared parser so a malformed payload can't reach the selector half-shaped;
  *  anything invalid degrades to the registry default (`inherit`). */
@@ -35,6 +36,7 @@ export interface DashboardBotDescriptor {
   wrapperCli?: string;
   cliLaunchMode?: CliLaunchMode;
   model?: string;
+  traexAutoModel?: TraexAutoModelConfig;
   modelBackendVariant?: 'standard' | 'max';
   reasoningEffort?: string;
   serviceTier?: CodexServiceTier;
@@ -102,6 +104,7 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     ...(bot.wrapperCli ? { wrapperCli: bot.wrapperCli } : {}),
     ...(bot.cliLaunchMode ? { cliLaunchMode: bot.cliLaunchMode } : {}),
     ...(bot.model ? { model: bot.model } : {}),
+    ...(bot.traexAutoModel ? { traexAutoModel: bot.traexAutoModel } : {}),
     ...(bot.modelBackendVariant ? { modelBackendVariant: bot.modelBackendVariant } : {}),
     ...(bot.reasoningEffort ? { reasoningEffort: bot.reasoningEffort } : {}),
     ...(bot.serviceTier ? { serviceTier: bot.serviceTier } : {}),

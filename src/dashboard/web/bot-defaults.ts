@@ -6,6 +6,7 @@ import type { AskOptionLayout } from '../../im/lark/ask-option-layout.js';
 import type { CodexReasoningEffort } from '../../services/codex-reasoning-effort.js';
 import type { CodexServiceTier } from '../../services/codex-service-tier.js';
 import type { StreamingCardButtonId } from '../../im/lark/streaming-card-buttons.js';
+import type { TraexAutoModelConfig } from '../../services/traex-auto-model.js';
 
 export type CliOption = {
   id: string;
@@ -29,6 +30,9 @@ export type CliOptionsState = {
 export type ModelCapabilities = {
   slug: string;
   serviceTiers: string[];
+  reasoningEfforts?: string[];
+  contextWindow?: number;
+  contextVariants?: Array<{ id: 'standard' | 'max'; contextWindow: number; reasoningEfforts?: string[] }>;
 };
 
 /** Keep the browser payload contract tied to the daemon's canonical schema. */
@@ -78,6 +82,7 @@ export type BotDefaultsRow = {
   wrapperCli?: string | null;
   cliLaunchMode?: 'forge-traex' | null;
   model?: string;
+  traexAutoModel?: TraexAutoModelConfig;
   modelBackendVariant?: 'standard' | 'max' | null;
   reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
   serviceTier?: CodexServiceTier;
@@ -343,10 +348,22 @@ export async function fetchDetectedModels(
     const modelCapabilities = Array.isArray(body.modelCapabilities)
       ? body.modelCapabilities.flatMap((item: unknown) => {
           if (typeof item !== 'object' || item === null) return [];
-          const { slug, serviceTiers } = item as { slug?: unknown; serviceTiers?: unknown };
+          const { slug, serviceTiers, reasoningEfforts, contextWindow, contextVariants } = item as Record<string, unknown>;
           if (typeof slug !== 'string' || !Array.isArray(serviceTiers)) return [];
           const tiers = serviceTiers.filter((tier): tier is string => typeof tier === 'string');
-          return [{ slug, serviceTiers: tiers }];
+          const variants = Array.isArray(contextVariants) ? contextVariants.flatMap(variant => {
+            if (!variant || typeof variant !== 'object') return [];
+            const { id, contextWindow: capacity, reasoningEfforts: efforts } = variant;
+            if ((id !== 'standard' && id !== 'max') || !Number.isSafeInteger(capacity) || capacity <= 0) return [];
+            return [{ id: id as 'standard' | 'max', contextWindow: capacity as number,
+              ...(Array.isArray(efforts) ? { reasoningEfforts: efforts.filter((effort): effort is string => typeof effort === 'string') } : {}),
+            }];
+          }) : undefined;
+          return [{ slug, serviceTiers: tiers,
+            ...(Array.isArray(reasoningEfforts) ? { reasoningEfforts: reasoningEfforts.filter((effort): effort is string => typeof effort === 'string') } : {}),
+            ...(Number.isSafeInteger(contextWindow) && (contextWindow as number) > 0 ? { contextWindow: contextWindow as number } : {}),
+            ...(variants?.length ? { contextVariants: variants } : {}),
+          }];
         })
       : undefined;
     const reasoningEffortsByModel = body.reasoningEffortsByModel

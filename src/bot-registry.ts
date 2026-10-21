@@ -97,6 +97,11 @@ import {
   normalizeQuotaFallbackBotConfig,
   type QuotaFallbackBotConfig,
 } from './services/quota-fallback.js';
+import {
+  normalizeTraexAutoModelConfig,
+  TRAEX_AUTO_MODEL_ID,
+  type TraexAutoModelConfig,
+} from './services/traex-auto-model.js';
 import { normalizeCardActionAckTimeoutMs } from './core/card-action-ack.js';
 import { cliSupportsConfigDir, normalizeCliConfigDir } from './core/cli-config-dir.js';
 import type {
@@ -1536,6 +1541,10 @@ export interface BotConfig {
    * `modelChoices` for the curated candidates surfaced in `botmux setup`.
    */
   model?: string;
+  /** Experimental TraeX-only ordered model allowlist used when model=`auto`.
+   * The first entry is the core model; later entries are capacity fallbacks.
+   * Missing keeps the feature off. */
+  traexAutoModel?: TraexAutoModelConfig;
   /** Per-chat defaults captured only by newly created topics. */
   groupDefaultModels?: Record<string, GroupDefaultModels>;
   /** Explicit per-group FIFO for authenticated managed-session IM inputs. Default off; independent of Oncall. */
@@ -3901,6 +3910,26 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         `[bot-registry:${entry.larkAppId}] nativeSubagentRuntime ignored: ${normalizedNativeSubagentRuntime.error}`,
       );
     }
+    const requestedModel = typeof entry.model === 'string' && entry.model.trim()
+      ? entry.model.trim()
+      : undefined;
+    const normalizedTraexAutoModel = normalizeTraexAutoModelConfig(entry.traexAutoModel);
+    const traexAutoRequested = entryCliId === 'traex'
+      && requestedModel?.toLowerCase() === TRAEX_AUTO_MODEL_ID;
+    if (traexAutoRequested && (!normalizedTraexAutoModel.config || normalizedTraexAutoModel.error)) {
+      logger.warn(
+        `[bot-registry:${entry.larkAppId}] virtual auto model ignored: `
+        + `${normalizedTraexAutoModel.error ?? 'traexAutoModel is not enabled'}`,
+      );
+    }
+    const traexAutoModel = traexAutoRequested
+      ? normalizedTraexAutoModel.config
+      : undefined;
+    // Never forward the reserved virtual id to TraeX. An invalid hand edit
+    // fails closed to the CLI default while preserving the rest of the bot.
+    const model = traexAutoRequested
+      ? (traexAutoModel ? TRAEX_AUTO_MODEL_ID : undefined)
+      : requestedModel;
 
     // voice：per-bot 语音引擎覆盖。结构化保留（engine ∈ sami|openai|minimax，
     // 三类凭证为对象，speaker/rate 透传，asr 为对象）；非对象或 engine 非法 →
@@ -4000,9 +4029,8 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       launchShell: typeof entry.launchShell === 'string' && entry.launchShell.trim()
         ? entry.launchShell.trim()
         : undefined,
-      model: typeof entry.model === 'string' && entry.model.trim()
-        ? entry.model.trim()
-        : undefined,
+      model,
+      traexAutoModel,
       groupDefaultModels: normalizeGroupDefaultModels(entry.groupDefaultModels),
       groupSerialInput: normalizeGroupSerialInput(entry.groupSerialInput),
       groupIdleClose: normalizeGroupIdleClose(entry.groupIdleClose),
@@ -4021,7 +4049,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         && isCodexReasoningEffort(entry.reasoningEffort)
         && cliModelSupportsReasoningEffort(
           entryCliId,
-          typeof entry.model === 'string' ? entry.model : undefined,
+          traexAutoModel?.models[0] ?? model,
           entry.reasoningEffort,
         )
         ? entry.reasoningEffort : undefined,
