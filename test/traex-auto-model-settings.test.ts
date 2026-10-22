@@ -137,7 +137,7 @@ describe('TraeX auto-model settings', () => {
     }
   });
 
-  it('keeps unsaved selections after remount and a fresh server object, then clears the draft only on successful save', async () => {
+  it('restores the saved switch after reload and recovers unfinished preferences when enabled again', async () => {
     const previous = globalThis.fetch;
     const entries = new Map<string, string>();
     vi.stubGlobal('window', { localStorage: {
@@ -171,7 +171,11 @@ describe('TraeX auto-model settings', () => {
       expect(entries.size).toBe(1); // persisted at edit edge, before refresh
       act(() => rendered!.unmount());
       await act(async () => { rendered = TestRenderer.create(createElement(BotAgentSection, { ...props, bot: { ...props.bot } })); });
-      expect(rendered!.root.findByProps({ 'data-input': 'autoModelEnabled' }).props.checked).toBe(true);
+      expect(rendered!.root.findByProps({ 'data-input': 'autoModelEnabled' }).props.checked).toBe(false);
+      expect(rendered!.root.findByProps({ dataInput: 'agentModel' }).props.value).toBe(props.bot.model);
+      expect(rendered!.root.findAllByProps({ 'data-input': 'autoModelReselectPerTurn' })).toHaveLength(0);
+      expect(entries.size).toBe(1);
+      act(() => rendered!.root.findByProps({ 'data-input': 'autoModelEnabled' }).props.onChange({ currentTarget: { checked: true } }));
       expect(rendered!.root.findByProps({ 'data-input': 'autoModelReselectPerTurn' }).props.checked).toBe(true);
       expect(rendered!.root.findByProps({ dataInput: 'autoModelContext0' }).props.value).toBe('standard');
       expect(rendered!.root.findByProps({ dataInput: 'autoModelEffort0' }).props.value).toBe('xhigh');
@@ -179,6 +183,68 @@ describe('TraeX auto-model settings', () => {
       expect(saved.traexAutoModel.modelSettings['GPT-6.1-Sol']).toEqual({ reasoningEffort: 'xhigh', modelBackendVariant: 'standard' });
       expect(saved.traexAutoModel.reselectPerTurn).toBe(true);
       expect(entries.size).toBe(0);
+    } finally {
+      if (rendered) act(() => rendered!.unmount());
+      globalThis.fetch = previous;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps a saved feature enabled through an unsaved cancellation, then saves disabling without losing its draft', async () => {
+    const previous = globalThis.fetch;
+    const entries = new Map<string, string>();
+    const pool = { enabled: true as const, models: ['saved-model'], queueTimeoutMs: 30_000 };
+    const draft = { enabled: false, models: ['draft-model'], reselectPerTurn: true,
+      modelSettings: { 'draft-model': { reasoningEffort: 'high', modelBackendVariant: 'standard' } },
+      timeoutSeconds: '15', cooldownSeconds: '45' };
+    // Existing v1 storage may still contain an unsaved switch.
+    entries.set('botmux:traex-auto-model-draft:v1:auto_saved', JSON.stringify({ version: 1, draft }));
+    vi.stubGlobal('window', { localStorage: {
+      getItem: (key: string) => entries.get(key) ?? null,
+      setItem: (key: string, value: string) => { entries.set(key, value); },
+      removeItem: (key: string) => { entries.delete(key); },
+    } });
+    let saved: any;
+    let bot: any = { larkAppId: 'auto_saved', cliId: 'traex', model: 'auto', traexAutoModel: pool };
+    globalThis.fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        saved = JSON.parse(init.body as string);
+        bot = { ...bot, model: saved.model, traexAutoModel: saved.traexAutoModel ?? undefined };
+      }
+      return { ok: true, status: 200, json: async () => init?.method === 'PUT'
+        ? { ok: true, cliId: 'traex', model: bot.model, traexAutoModel: bot.traexAutoModel }
+        : { models: ['saved-model', 'draft-model'], source: 'live' } };
+    }) as any;
+    const props = { sessionFallback: 'traex', cliState: {
+      options: [{ id: 'traex', label: 'TraeX' }], ttadkModelDefault: '', ttadkModelSuggestions: [],
+    }, patchBot: vi.fn() };
+    let rendered: TestRenderer.ReactTestRenderer | undefined;
+    const mount = async () => {
+      await act(async () => { rendered = TestRenderer.create(createElement(BotAgentSection, { ...props, bot: { ...bot } })); });
+    };
+    const toggle = (checked: boolean) => act(() =>
+      rendered!.root.findByProps({ 'data-input': 'autoModelEnabled' }).props.onChange({ currentTarget: { checked } }));
+    try {
+      await mount();
+      expect(rendered!.root.findByProps({ 'data-input': 'autoModelEnabled' }).props.checked).toBe(true);
+      toggle(false);
+      act(() => rendered!.unmount());
+      await mount();
+      expect(rendered!.root.findByProps({ 'data-input': 'autoModelEnabled' }).props.checked).toBe(true);
+      expect(rendered!.root.findByProps({ dataInput: 'autoModel0' }).props.value).toBe('draft-model');
+      toggle(false);
+      await act(async () => { await rendered!.root.findByProps({ 'data-action': 'save-agent' }).props.onClick(); });
+      expect(saved).toMatchObject({ model: 'draft-model', traexAutoModel: null });
+      expect(entries.size).toBe(1);
+      act(() => rendered!.unmount());
+      await mount();
+      expect(rendered!.root.findByProps({ 'data-input': 'autoModelEnabled' }).props.checked).toBe(false);
+      toggle(true);
+      expect(rendered!.root.findByProps({ dataInput: 'autoModel0' }).props.value).toBe('draft-model');
+      expect(rendered!.root.findByProps({ dataInput: 'autoModelEffort0' }).props.value).toBe('high');
+      expect(rendered!.root.findByProps({ dataInput: 'autoModelContext0' }).props.value).toBe('standard');
+      expect(rendered!.root.findByProps({ 'data-input': 'autoModelTimeout' }).props.value).toBe('15');
+      expect(rendered!.root.findByProps({ 'data-input': 'autoModelReselectPerTurn' }).props.checked).toBe(true);
     } finally {
       if (rendered) act(() => rendered!.unmount());
       globalThis.fetch = previous;
