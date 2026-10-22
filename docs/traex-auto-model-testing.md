@@ -27,7 +27,7 @@ bun run daemon:restart
 
 页面作用说明为「模型排队时，自动切换到模型池中其他不排队的模型。」；详细策略在旁边问号提示中。「话题内每轮重新择优」默认关闭。
 
-若机器全局 RPC 已开启，先把当前 TraeX Bot 的「RPC 输入」设为「关闭（终端输入）」，再保存 Auto。只改当前 Bot，其他 Bot 可继续跟随全局 RPC。此项支持 true/false/未设置三种状态；`/config set codexRpcInput off` 同样保存显式 false，`/config unset codexRpcInput` 恢复跟随全局。已存在 Auto 的 Bot 在恢复全局 RPC 后冲突时，会拒绝该设置变更；先关闭 Auto 或保留该 Bot 的 RPC-off 覆盖。
+开启 Auto、选好模型池并保存即可使用，输入方式会自动适配，无需设置 RPC。适配只在当前会话实际运行 Auto 时生效，原输入配置保持原样；关闭 Auto 并保存后恢复原设置，其他 Bot 和全局设置不受影响。已有话题在空闲时 `/restart` 加载新设置。
 
 若页面提示 daemon PATH 找不到 `traex`，先在运行 Botmux 的机器执行 `command -v traex`。终端能找到而页面提示缺失，说明后台进程的 PATH 与终端不同；将实际可执行文件所在目录加入服务启动 PATH，再重启核验。自动模型功能没有安装或卸载 TraeX，也没有改动 CLI 可用性检测逻辑。
 
@@ -36,9 +36,11 @@ bun run daemon:restart
 | 操作 | 预期结果 |
 | --- | --- |
 | 不开启实验功能 | 保持原有手动选模型行为 |
-| 全局 RPC 开启，当前 Bot 跟随全局，尝试保存 Auto | 页面显示冲突，服务端拒绝且配置不变 |
-| 当前 Bot RPC 设为关闭，再保存 Auto | 保存显式 false；重载后仍为终端输入，其他 Bot 保留全局 RPC |
-| 手改旧冲突配置，或保存后才开启全局 RPC | 配置页显示冲突，旧 Worker 启动明确通知未运行 Auto |
+| 全局 RPC 开启，当前 Bot 跟随全局，直接保存 Auto | 保存成功，Auto 自动使用终端输入，无需额外操作 |
+| Bot 原输入配置分别为 true、false、未设置，保存 Auto | 三种情况均可使用，原配置字段保持原样；其他 Bot 保持自身输入设置 |
+| 关闭 Auto 并保存，重启话题 | 恢复当前 Bot 原输入设置 |
+| 旧 Auto 配置启用了 RPC，或保存后开启全局 RPC | 重启后自动适配，继续运行 Auto |
+| 在 Auto Bot 中通过调用参数指定具体模型 | 本次调用使用具体模型与原输入配置，不被 Auto 自动适配覆盖 |
 | 添加至少五个模型，调整顺序、思考强度与上下文 | 模型池无数量上限，各模型保存独立档位 |
 | 打开启用、编辑模型池但不保存，刷新页面 | 开关按服务端已保存配置显示；原来关闭的开关恢复关闭 |
 | 刷新后重新打开实验开关 | 模型顺序、各模型档位、阈值及话题内重新择优偏好恢复 |
@@ -66,6 +68,8 @@ bun run test -- test/traex-auto-model.test.ts \
   test/traex-auto-model-settings.test.ts \
   test/traex-auto-model-preferences.test.ts \
   test/traex-auto-model-worker.test.ts \
+  test/traex-auto-rpc-config.integration.test.ts \
+  test/traex-auto-rpc-runtime.integration.test.ts \
   test/traex-model-load.test.ts \
   test/traex-auto-model.integration.test.ts
 ```
@@ -91,7 +95,9 @@ macOS 本地编译二进制若被系统拒绝执行，按仓库构建说明完�
 
 草稿开关分离修正追加验证：99 项相关回归通过；真实浏览器操作验证未保存启用后刷新关闭、重新打开恢复偏好、保存启用后刷新保持、保存关闭后刷新关闭且草稿保留。浏览器使用真实组件与隔离的模拟配置接口。
 
-RPC 兼容修正追加验证：真实配置接口已复现旧版保存 HTTP 200 但启动 RPC 的缺陷；修正后继承 RPC 的 Auto 保存返回 HTTP 400，显式 false 返回 HTTP 200。两轮相关回归分别 315 项与 209 项通过；源码 Worker 五场景、编译二进制/tmux 五场景全部通过，包含旧冲突配置明确通知、全局 RPC 开启但目标 Bot 显式 false 时继续切换。真实浏览器验证冲突提示、禁止保存、选择 Bot-only RPC-off 后保存及刷新。编译包启动检查新增普通日志恢复检查并通过。
+输入兼容已改为自动适配：原来的 RPC 手动下拉和冲突拦截已移除，保存 Auto 不改写原输入配置。回归覆盖全局 true/false 与 Bot true/false/未设置的六种组合，以及关闭恢复、其他 Bot 隔离、显式模型调用、重启和旧 RPC 面板转换。
+
+自动适配追加验证：16 个相关文件共 330 项回归通过，完整构建通过；源码 Worker/PTY 五个场景通过（修正一处测试记录字段后单独重跑新增场景），编译二进制/tmux 五个场景及二进制 smoke 全部通过。真实浏览器连接隔离的真实 Bot 配置接口，验证全局与 Bot RPC 均为 true 时直接保存 Auto 返回 HTTP 200，原 RPC 字段保持 true、实际输入自动为终端；关闭后恢复 RPC，其他 Bot 与全局配置原样保留。未保存刷新、草稿恢复、保存启用后刷新、未保存取消后刷新及保存关闭后刷新均通过。
 
 ## 反馈记录
 

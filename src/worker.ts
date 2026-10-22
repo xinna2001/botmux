@@ -4224,27 +4224,25 @@ const activeTurnAuthority = new ActiveTurnAuthority((previousTurnId, turnId) => 
 function configureTraexAutoModel(
   cfg: Extract<DaemonToWorker, { type: 'init' }>,
 ): void {
-  traexAutoModelController = cfg.cliId === 'traex'
+  const managedAuto = cfg.cliId === 'traex'
     && cfg.traexAutoModel?.enabled === true
     && !cfg.adoptMode
     && !cfg.existingAppServerEndpoint
     && !cfg.wrapperCli
-    && !cfg.cliLaunchMode
-    && !cfg.codexRpcInput
+    && !cfg.cliLaunchMode;
+  // Older daemons may send the stored RPC preference rather than the launch
+  // mode. Auto owns this managed terminal; normalize before any RPC startup.
+  if (managedAuto) {
+    cfg.codexRpcInput = false;
+    if (lastInitConfig) lastInitConfig.codexRpcInput = false;
+  }
+  traexAutoModelController = managedAuto && cfg.traexAutoModel
     ? new TraexAutoModelController(cfg.traexAutoModel,
       cfg.resume && validTraexAutoModelRuntime(cfg.traexAutoModel, cfg.traexAutoModelRuntime, cfg.cliSessionId)
         ? cfg.traexAutoModelRuntime : undefined)
     : null;
   traexAutoModelSwitching = false;
   traexAutoModelTurnReplayForbidden = cfg.atMostOnce === true;
-  if (cfg.cliId === 'traex' && cfg.traexAutoModel?.enabled && cfg.codexRpcInput === true) {
-    log('TraeX Auto disabled: effective RPC input conflicts with terminal model switching');
-    send({
-      type: 'user_notify',
-      message: t('worker.traex_auto_model.rpc_conflict', undefined, cfg.locale),
-      ...(cfg.turnId ? { turnId: cfg.turnId } : {}),
-    });
-  }
   if (traexAutoModelController) {
     if (cfg.resume && validTraexAutoModelRuntime(traexAutoModelController.config, cfg.traexAutoModelRuntime, cfg.cliSessionId)) {
       deliveredPluginSkillCatalogFingerprint = cfg.traexAutoModelRuntime.skillCatalogFingerprint;

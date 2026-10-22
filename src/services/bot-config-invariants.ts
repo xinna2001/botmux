@@ -1,8 +1,5 @@
 import { parseSandboxNetworkPolicy } from '../core/sandbox-network-policy.js';
-import { readGlobalConfig } from '../global-config.js';
-import { traexAutoModelRpcConflict } from './codex-rpc-input-policy.js';
 export type BotConfigInvariantError =
-  | 'traex_auto_model_rpc_conflict'
   | 'codex_browser_requires_codex_app'
   | 'codex_browser_config_conflict'
   | 'existing_app_server_sandbox_conflict'
@@ -23,9 +20,6 @@ function sandboxEngaged(entry: any): boolean {
 /** Cross-field invariants shared by every bots.json writer. */
 export function botConfigInvariantError(entry: any): BotConfigInvariantError | undefined {
   if (!entry || typeof entry !== 'object') return undefined;
-  if (traexAutoModelRpcConflict(entry, readGlobalConfig().dashboard?.codexRpcInput === true)) {
-    return 'traex_auto_model_rpc_conflict';
-  }
   if (entry.sandboxNetworkPolicy !== undefined) {
     try { parseSandboxNetworkPolicy(entry.sandboxNetworkPolicy); } catch { return 'invalid_sandbox_network_policy'; }
     if ((entry.sandbox !== true && entry.sandbox !== 'oncall') || (entry.backendType ?? 'pty') !== 'pty' || entry.existingAppServer) return 'sandbox_network_policy_requires_local_pty_oncall';

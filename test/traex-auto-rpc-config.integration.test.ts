@@ -8,12 +8,15 @@ import {
 import { setLarkAppId, startIpcServer } from '../src/core/dashboard-ipc-server.js';
 import { invalidateGlobalConfigCache } from '../src/global-config.js';
 import { config } from '../src/config.js';
-import { resolveCodexRpcInput } from '../src/services/codex-rpc-input-policy.js';
+import { resolveBotCodexRpcInput, resolveCodexRpcInput } from '../src/services/codex-rpc-input-policy.js';
 import { botDefaultsPayload } from '../src/dashboard/bot-payload.js';
 import { applyConfigField, findConfigField } from '../src/services/bot-config-store.js';
 
 describe('Auto and global RPC configuration compatibility', () => {
-  it('rejects inherited RPC atomically and persists a per-bot terminal override without changing its RPC peer', async () => {
+  it.each([
+    { global: false, override: undefined }, { global: false, override: false }, { global: false, override: true },
+    { global: true, override: undefined }, { global: true, override: false }, { global: true, override: true },
+  ])('enables and disables Auto with global=$global / override=$override without changing stored input preferences', async ({ global, override }) => {
     const root = mkdtempSync(join(tmpdir(), 'auto-rpc-config-'));
     const oldBots = process.env.BOTS_CONFIG;
     const oldGlobal = process.env.BOTMUX_GLOBAL_CONFIG_FILE;
@@ -21,11 +24,13 @@ describe('Auto and global RPC configuration compatibility', () => {
     const globalPath = join(root, 'global.json');
     process.env.BOTS_CONFIG = botsPath;
     process.env.BOTMUX_GLOBAL_CONFIG_FILE = globalPath;
-    const globalText = JSON.stringify({ dashboard: { codexRpcInput: true } });
+    const globalText = JSON.stringify({ dashboard: { codexRpcInput: global } });
     writeFileSync(globalPath, globalText);
     const peer = { larkAppId: 'rpc_peer', larkAppSecret: 'fixture', cliId: 'codex' };
+    const traexPeer = { larkAppId: 'traex_peer', larkAppSecret: 'fixture', cliId: 'traex' };
     writeFileSync(botsPath, JSON.stringify([
-      { larkAppId: 'auto_target', larkAppSecret: 'fixture', cliId: 'traex' }, peer,
+      { larkAppId: 'auto_target', larkAppSecret: 'fixture', cliId: 'traex',
+        ...(override === undefined ? {} : { codexRpcInput: override }) }, peer, traexPeer,
     ]));
     invalidateGlobalConfigCache();
     __testOnly_resetBotRegistry();
@@ -39,43 +44,46 @@ describe('Auto and global RPC configuration compatibility', () => {
       body: JSON.stringify({ cliId: 'traex', model: 'auto', traexAutoModel: pool, ...extra }),
     });
     try {
-      const before = readFileSync(botsPath, 'utf8');
-      const rejected = await save();
-      expect(rejected.status).toBe(400);
-      expect(await rejected.json()).toMatchObject({ ok: false, error: 'traex_auto_model_rpc_conflict' });
-      expect(readFileSync(botsPath, 'utf8')).toBe(before);
-      expect(getBot('auto_target').config.traexAutoModel).toBeUndefined();
-      const accepted = await save({ codexRpcInput: false });
+      const accepted = await save();
       expect(accepted.status).toBe(200);
       expect(await accepted.json()).toMatchObject({
-        ok: true, codexRpcInput: false, codexRpcInputDefault: true, codexRpcInputEffective: false,
+        ok: true, codexRpcInput: override ?? null, codexRpcInputDefault: global, codexRpcInputEffective: false,
       });
-      expect(JSON.parse(readFileSync(botsPath, 'utf8'))).toEqual([
-        expect.objectContaining({ codexRpcInput: false, traexAutoModel: pool }), peer,
-      ]);
+      const persisted = JSON.parse(readFileSync(botsPath, 'utf8'));
+      expect(persisted).toEqual([expect.objectContaining({ traexAutoModel: pool }), peer, traexPeer]);
+      expect(persisted[0].codexRpcInput).toBe(override);
+      expect(Object.hasOwn(persisted[0], 'codexRpcInput')).toBe(override !== undefined);
       const loaded = loadBotConfigs();
-      expect(loaded[0].codexRpcInput).toBe(false);
-      expect(loaded[1].codexRpcInput).toBeUndefined();
-      expect(resolveCodexRpcInput(loaded[0].cliId, loaded[0].codexRpcInput, config.codexRpcInputDefault)).toBe(false);
-      expect(resolveCodexRpcInput(loaded[1].cliId, loaded[1].codexRpcInput, config.codexRpcInputDefault)).toBe(true);
-      // An old client omitting the field preserves the explicit false.
+      expect(loaded[0].codexRpcInput).toBe(override);
+      expect(resolveBotCodexRpcInput(loaded[0], config.codexRpcInputDefault)).toBe(false);
+      expect(loaded.slice(1).map(bot => resolveBotCodexRpcInput(bot, config.codexRpcInputDefault))).toEqual([global, global]);
+      // Saving again, including from an older client, preserves the original preference.
       expect((await save()).status).toBe(200);
       const defaults = await (await fetch(`${base}/api/bot-default-oncall`)).json();
       expect(defaults).toMatchObject({
-        codexRpcInput: false, codexRpcInputDefault: true, codexRpcInputEffective: false,
+        codexRpcInput: override ?? null, codexRpcInputDefault: global, codexRpcInputEffective: false,
         traexAutoModelBlockedReason: null,
       });
       const spec = findConfigField('codexRpcInput')!;
-      // /config writers must not recreate the same conflict.
-      const reset = await applyConfigField('auto_target', spec, null);
-      expect(reset).toMatchObject({ ok: false, reason: 'traex_auto_model_rpc_conflict' });
-      const force = await applyConfigField('auto_target', spec, true);
-      expect(force).toMatchObject({ ok: false, reason: 'traex_auto_model_rpc_conflict' });
-      expect((await applyConfigField('rpc_peer', spec, false)).ok).toBe(true);
-      expect(getBot('rpc_peer').config.codexRpcInput).toBe(false);
-      expect(loadBotConfigs()[1].codexRpcInput).toBe(false);
-      expect((await applyConfigField('rpc_peer', spec, null)).ok).toBe(true);
-      expect(getBot('rpc_peer').config.codexRpcInput).toBeUndefined();
+      // /config edits remain valid; Auto derives terminal mode until disabled.
+      for (const value of [true, false, null]) {
+        expect((await applyConfigField('auto_target', spec, value)).ok).toBe(true);
+        expect(resolveBotCodexRpcInput(getBot('auto_target').config, global)).toBe(false);
+      }
+      expect((await applyConfigField('auto_target', spec, override ?? null)).ok).toBe(true);
+      const disabled = await save({ model: 'first', traexAutoModel: null });
+      expect(disabled.status).toBe(200);
+      expect(await disabled.json()).toMatchObject({
+        codexRpcInput: override ?? null, codexRpcInputEffective: override ?? global,
+      });
+      const reloaded = loadBotConfigs();
+      expect(reloaded[0].codexRpcInput).toBe(override);
+      expect(Object.hasOwn(JSON.parse(readFileSync(botsPath, 'utf8'))[0], 'codexRpcInput')).toBe(override !== undefined);
+      expect(resolveBotCodexRpcInput(reloaded[0], global)).toBe(override ?? global);
+      expect(reloaded[0].traexAutoModel).toBeUndefined();
+      const disabledDefaults = await (await fetch(`${base}/api/bot-default-oncall`)).json();
+      expect(disabledDefaults.codexRpcInputEffective).toBe(override ?? global);
+      expect(JSON.parse(readFileSync(botsPath, 'utf8')).slice(1)).toEqual([peer, traexPeer]);
       expect(readFileSync(globalPath, 'utf8')).toBe(globalText);
     } finally {
       await server.close();
@@ -88,7 +96,7 @@ describe('Auto and global RPC configuration compatibility', () => {
     }
   }, 30_000);
 
-  it('exposes legacy conflicts, including after a global default change, and preserves true/false/absent on load', () => {
+  it('adapts legacy Auto after global changes and leaves explicit models and unsupported launch modes alone', () => {
     const root = mkdtempSync(join(tmpdir(), 'auto-rpc-legacy-'));
     const previous = process.env.BOTMUX_GLOBAL_CONFIG_FILE;
     process.env.BOTMUX_GLOBAL_CONFIG_FILE = join(root, 'global.json');
@@ -101,7 +109,7 @@ describe('Auto and global RPC configuration compatibility', () => {
       writeFileSync(process.env.BOTMUX_GLOBAL_CONFIG_FILE, JSON.stringify({ dashboard: { codexRpcInput: true } }));
       invalidateGlobalConfigCache();
       expect(botDefaultsPayload(descriptor, {})).toMatchObject({
-        codexRpcInputEffective: true, traexAutoModelBlockedReason: 'rpc_input',
+        codexRpcInputEffective: false, traexAutoModelBlockedReason: null,
       });
       expect(botDefaultsPayload({ ...descriptor, codexRpcInput: false }, {})).toMatchObject({
         codexRpcInputEffective: false, traexAutoModelBlockedReason: null,
@@ -112,6 +120,12 @@ describe('Auto and global RPC configuration compatibility', () => {
         { larkAppId: 'on', larkAppSecret: 'fixture', cliId: 'codex', codexRpcInput: true },
       ]));
       expect(loaded.map(bot => bot.codexRpcInput)).toEqual([undefined, false, true]);
+      expect(botDefaultsPayload({ ...descriptor, codexRpcInput: true }, {})).toMatchObject({
+        codexRpcInput: true, codexRpcInputEffective: false,
+      });
+      for (const changed of [{ model: 'first' }, { wrapperCli: 'gateway' }, { cliLaunchMode: 'remote' }]) {
+        expect(botDefaultsPayload(descriptor, { ...changed, codexRpcInput: true }).codexRpcInputEffective).toBe(true);
+      }
       expect(resolveCodexRpcInput('claude-code', undefined, true)).toBe(false);
       expect(resolveCodexRpcInput('codex', true, true, 'external-server')).toBe(false);
     } finally {

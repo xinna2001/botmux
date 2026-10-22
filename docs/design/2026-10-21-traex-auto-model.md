@@ -42,9 +42,9 @@ Auto 的 exact resume 继续刷新 Skill 快照和 MCP 绑定，但比较标准�
 
 飞书卡片使用已有 `active_runtime` 通道显示实际运行模型，切换后立即重新发布，新的 `turn_context` 再提供执行器观测。Wrapper、Forge、共享 adopt、直接 RPC、远端后端、durable delivery 和 at-most-once 输入不进行自动容量切换。人工 `/model`、`/new`、`/clear` 优先，停用本 Worker 的池；重新 init/restart 可重新加载设置。
 
-RPC 输入的实际配置由一处共享规则解析：仅 Codex/TraeX 支持；Bot 的显式 true/false 优先，未设置才继承 `dashboard.codexRpcInput`。共享 App Server 接入不启用 Botmux 自有 RPC。Bot 配置读取、保存校验、Worker 初始启动与 `/restart` 使用同一规则，不再用 OR 合并丢失显式 false。
+RPC 输入的实际配置由一处共享规则解析：仅 Codex/TraeX 支持；通常 Bot 的显式 true/false 优先，未设置才继承 `dashboard.codexRpcInput`。当前实际启动为受支持的 TraeX Auto 时，自动使用终端输入；Bot 原有 `codexRpcInput` 字段保持原样，关闭 Auto 后自然恢复。共享 App Server 接入不启用 Botmux 自有 RPC。Dashboard 的生效状态、Worker 初始启动与 `/restart` 使用同一规则，不再用 OR 合并丢失显式 false。
 
-开启 Auto 时若实际配置为 RPC，页面显示冲突并阻止保存，服务端也原子拒绝；不自动改全局开关。操作者可只把当前 Bot 的「RPC 输入」设为「关闭（终端输入）」，与 Auto 一起保存，其他 Bot 继续继承全局。旧配置或后来开启全局 RPC 导致冲突时，配置页显示阻断原因，Worker 启动发出明确通知，保持 RPC 边界。修复后需重启目标会话；关闭 RPC 后恢复时，只替换已确认的旧 RPC 面板，无法确认移除则中止，避免把终端输入送进旧 RPC viewer。
+开启 Auto、选择模型池并保存即可使用，无需另设输入选项。适配只作用于当前实际运行 Auto 的 Botmux 托管终端，不修改全局或其他 Bot 配置；显式指定具体模型的调用、wrapper、远端启动及 adopt 不因 Bot 的 Auto 偏好改变输入方式。即使旧 daemon 把 RPC 偏好传给 Auto Worker，受支持的 Worker 也会在启动 RPC 前自动适配。存量会话在重启时加载；从旧 RPC 恢复到终端时，只替换已确认的旧 RPC 面板，无法确认移除则中止，避免把终端输入送进旧 RPC viewer。
 
 配置在新启动或重启会话时生效。手动 `botmux upgrade` 会覆盖本地热修，需要检查正式版本是否包含此功能。切换仍会影响跨模型提示词缓存；本功能限制切换次数，不能保证缓存保留或 Token 用量下降。
 
