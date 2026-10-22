@@ -90,6 +90,7 @@ import { lookupCliSelection } from '../../setup/cli-selection.js';
 import { cliSupportsConfigDir } from '../../core/cli-config-dir.js';
 import { fetchAgents } from './agents-api.js';
 import { normalizeTraexAutoModelConfig, resolveTraexAutoModelSettings } from '../../services/traex-auto-model.js';
+import { resolveCodexRpcInput } from '../../services/codex-rpc-input-policy.js';
 import { TraexAutoModelEditor } from './traex-auto-model-editor.js';
 import {
   autoModelDraftFromConfig, readAutoModelDraft, writeAutoModelDraft, clearAutoModelDraft,
@@ -2272,6 +2273,13 @@ export function BotAgentSection(props: {
   const [autoTimeoutSeconds, setAutoTimeoutSeconds] = useState(autoDraftRef.current.timeoutSeconds);
   const [autoCooldownSeconds, setAutoCooldownSeconds] = useState(autoDraftRef.current.cooldownSeconds);
   const [autoDraftStorageFailed, setAutoDraftStorageFailed] = useState(false);
+  const [rpcInputMode, setRpcInputMode] = useState<'inherit' | 'on' | 'off'>(
+    typeof bot.codexRpcInput === 'boolean' ? bot.codexRpcInput ? 'on' : 'off' : 'inherit',
+  );
+  const [rpcInputTouched, setRpcInputTouched] = useState(false);
+  const rpcOverride = rpcInputMode === 'inherit' ? undefined : rpcInputMode === 'on';
+  const effectiveRpcInput = resolveCodexRpcInput(selectedAgentCliId(cliKey), rpcOverride, bot.codexRpcInputDefault === true);
+  const autoRpcConflict = autoModelEnabled && selectedAgentCliId(cliKey) === 'traex' && effectiveRpcInput;
   const pendingAutoDefaults = useRef(new Set<string>());
   function applyAutoDraft(draft: TraexAutoModelDraft) {
     autoDraftRef.current = draft;
@@ -2338,6 +2346,8 @@ export function BotAgentSection(props: {
     setModel(draft.enabled ? 'auto' : typeof bot.model === 'string' ? bot.model : '');
     setAutoModelTouched(!!stored);
     setAutoDraftStorageFailed(false);
+    setRpcInputMode(typeof bot.codexRpcInput === 'boolean' ? bot.codexRpcInput ? 'on' : 'off' : 'inherit');
+    setRpcInputTouched(false);
     pendingAutoDefaults.current.clear();
     setModelBackendVariant(bot.modelBackendVariant ?? '');
     setModelBackendVariantTouched(false);
@@ -2368,6 +2378,8 @@ export function BotAgentSection(props: {
     bot.larkAppId,
     bot.model,
     autoConfigKey,
+    bot.codexRpcInput,
+    bot.codexRpcInputDefault,
     bot.modelBackendVariant,
     bot.reasoningEffort,
     bot.serviceTier,
@@ -2488,6 +2500,10 @@ export function BotAgentSection(props: {
     setAgentStatus(null);
     setRuntimeStatus(null);
     setNativePolicyErrors({ model: null, effort: null });
+    if (autoRpcConflict) {
+      setAgentStatus({ text: tr('botDefaults.autoModelRpcConflict') });
+      return;
+    }
     let cliRuntime: CliRuntimeConfig | null | undefined;
     if (runtimeTouched) cliRuntime = null;
     if (runtimeTouched && cliKey === 'codex' && runtimeDraft.mode === 'custom') {
@@ -2574,6 +2590,7 @@ export function BotAgentSection(props: {
         cliId: cliKey,
         ...(cliSelectionTouched ? { replaceCliSelection: true } : {}),
         model,
+        ...(rpcInputTouched ? { codexRpcInput: rpcOverride ?? null } : {}),
         ...(saveCliId === 'traex' && (autoModelTouched || autoModelEnabled)
           ? { traexAutoModel: autoConfig.config ?? null } : {}),
         ...(isBackendVariantCliId(saveCliId) && modelBackendVariantTouched ? { modelBackendVariant } : {}),
@@ -2652,6 +2669,10 @@ export function BotAgentSection(props: {
           cliLaunchMode: res.body.cliLaunchMode ?? null,
           model: res.body.model ?? '',
           traexAutoModel: res.body.traexAutoModel ?? undefined,
+          codexRpcInput: res.body.codexRpcInput === undefined ? bot.codexRpcInput : res.body.codexRpcInput,
+          codexRpcInputDefault: res.body.codexRpcInputDefault ?? bot.codexRpcInputDefault,
+          codexRpcInputEffective: res.body.codexRpcInputEffective,
+          traexAutoModelBlockedReason: null,
           modelBackendVariant: res.body.modelBackendVariant ?? undefined,
           reasoningEffort: res.body.reasoningEffort ?? undefined,
           serviceTier: res.body.serviceTier ?? undefined,
@@ -2676,6 +2697,7 @@ export function BotAgentSection(props: {
         setDshRuntimeTouched(false);
         setRuntimeTouched(false);
         setCliSelectionTouched(false);
+        setRpcInputTouched(false);
         setNativePolicyTouched(false);
         const savedNativePolicy = res.body.nativeSubagentRuntime;
         setNativeModelMode(nativePolicyModeFrom(savedNativePolicy?.model));
@@ -3057,7 +3079,30 @@ export function BotAgentSection(props: {
         </div>
       )}
       {selectedCliId === 'traex' && !bot.wrapperCli && !option?.cliLaunchMode ? (
+        <div className="bd-row">
+          <div className="bd-field">
+            <FieldTitle help={tr('botDefaults.rpcInputHelp')}>{tr('botDefaults.rpcInputTitle')}</FieldTitle>
+            <DropdownField dataInput="agentRpcInput" ariaLabel={tr('botDefaults.rpcInputTitle')}
+              value={rpcInputMode} disabled={agentBusy}
+              options={[
+                { value: 'inherit', label: tr('botDefaults.rpcInputInherit', {
+                  mode: tr(bot.codexRpcInputDefault ? 'botDefaults.rpcInputOn' : 'botDefaults.rpcInputOff'),
+                }) },
+                { value: 'off', label: tr('botDefaults.rpcInputOff') },
+                { value: 'on', label: tr('botDefaults.rpcInputOn') },
+              ]}
+              onChange={value => {
+                setRpcInputMode(value as 'inherit' | 'on' | 'off');
+                setRpcInputTouched(true);
+                setAutoModelTouched(true);
+                setAgentStatus(null);
+              }} />
+          </div>
+        </div>
+      ) : null}
+      {selectedCliId === 'traex' && !bot.wrapperCli && !option?.cliLaunchMode ? (
         <TraexAutoModelEditor enabled={autoModelEnabled} models={autoModels}
+          conflict={autoRpcConflict ? tr('botDefaults.autoModelRpcConflict') : undefined}
           reselectPerTurn={autoReselectPerTurn}
           onReselectPerTurn={enabled => editAutoDraft({ reselectPerTurn: enabled })}
           modelSettings={autoModelSettings} capabilities={detectedModels?.modelCapabilities}

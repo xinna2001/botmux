@@ -107,6 +107,7 @@ export const messages: Record<string, string> = {
   'worker.traex_auto_model.lowest_load_hold': '⚠️ Later models report high load. The current model {model} has the lowest pool load ({load}%), with your pool order breaking ties. Holding it.',
   'worker.traex_auto_model.queued_backup': '↪️ Backup model {fromModel} actually queued. After brief confirmation, trying allowlisted model {toModel} and resuming the same session.',
   'worker.traex_auto_model.continue_prompt': 'Continue the current unfinished task. First use the existing session context to identify steps that already completed; do not repeat successful side-effecting operations. Resume from the interruption and provide the final result.',
+  'worker.traex_auto_model.rpc_conflict': '⚠️ This session uses RPC input, so automatic model switching is inactive. Turn RPC input off in this bot’s Agent settings, save, and restart the session. Other bots’ RPC settings are unchanged.',
   'card.private.snapshot_note': '🔒 Private static snapshot (visible only to you, not live-updating). Tap Open Web Terminal for the live view.',
   'card.private.snapshot_note_no_terminal': '🔒 Private static snapshot (visible only to you, not live-updating). This backend does not provide a Web Terminal.',
 

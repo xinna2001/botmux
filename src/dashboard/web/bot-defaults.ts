@@ -83,6 +83,10 @@ export type BotDefaultsRow = {
   cliLaunchMode?: 'forge-traex' | null;
   model?: string;
   traexAutoModel?: TraexAutoModelConfig;
+  codexRpcInput?: boolean | null;
+  codexRpcInputDefault?: boolean;
+  codexRpcInputEffective?: boolean;
+  traexAutoModelBlockedReason?: 'rpc_input' | null;
   modelBackendVariant?: 'standard' | 'max' | null;
   reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
   serviceTier?: CodexServiceTier;

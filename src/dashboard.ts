@@ -3089,6 +3089,7 @@ async function configuredBotDefaultsRecoveryRows(
           cliLaunchMode: bot.cliLaunchMode,
           model: bot.model,
           traexAutoModel: bot.traexAutoModel,
+          codexRpcInput: bot.codexRpcInput,
           modelBackendVariant: bot.modelBackendVariant,
           reasoningEffort: bot.reasoningEffort,
           serviceTier: bot.serviceTier,
