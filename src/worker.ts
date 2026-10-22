@@ -3752,6 +3752,14 @@ function configureTraexAutoModel(
     : null;
   traexAutoModelSwitching = false;
   traexAutoModelTurnReplayForbidden = cfg.atMostOnce === true;
+  if (cfg.cliId === 'traex' && cfg.traexAutoModel?.enabled && cfg.codexRpcInput === true) {
+    log('TraeX Auto disabled: effective RPC input conflicts with terminal model switching');
+    send({
+      type: 'user_notify',
+      message: t('worker.traex_auto_model.rpc_conflict', undefined, cfg.locale),
+      ...(cfg.turnId ? { turnId: cfg.turnId } : {}),
+    });
+  }
   if (traexAutoModelController) {
     if (cfg.resume && validTraexAutoModelRuntime(traexAutoModelController.config, cfg.traexAutoModelRuntime, cfg.cliSessionId)) {
       deliveredPluginSkillCatalogFingerprint = cfg.traexAutoModelRuntime.skillCatalogFingerprint;
@@ -26403,8 +26411,13 @@ process.on('message', async (raw: unknown) => {
       if (msg.model !== undefined && lastInitConfig) {
         lastInitConfig.model = msg.model === null ? undefined : msg.model;
       }
+      if (lastInitConfig && msg.codexRpcInput !== undefined) {
+        lastInitConfig.codexRpcInput = msg.codexRpcInput;
+      }
       if (lastInitConfig && msg.traexAutoModel !== undefined) {
         lastInitConfig.traexAutoModel = msg.traexAutoModel ?? undefined;
+        configureTraexAutoModel({ ...lastInitConfig, prompt: '' });
+      } else if (lastInitConfig && msg.codexRpcInput !== undefined) {
         configureTraexAutoModel({ ...lastInitConfig, prompt: '' });
       }
       if (msg.larkToolBinding !== undefined && lastInitConfig) {

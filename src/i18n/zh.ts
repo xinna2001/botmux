@@ -108,6 +108,7 @@ export const messages: Record<string, string> = {
   'worker.traex_auto_model.lowest_load_hold': '⚠️ 后续模型均显示高负载，当前 {model} 是池内负载最低的模型（{load}%）。负载相同时按你的顺序选择；保持等待。',
   'worker.traex_auto_model.queued_backup': '↪️ 备用模型 {fromModel} 实际排队，短暂确认后继续尝试模型池中的 {toModel}，正在续接原会话。',
   'worker.traex_auto_model.continue_prompt': '继续完成当前尚未结束的任务。请先根据已有会话上下文确认已经完成的步骤，不要重复已经成功执行的有副作用操作，然后从中断处继续并给出最终结果。',
+  'worker.traex_auto_model.rpc_conflict': '⚠️ 当前会话启用了 RPC 输入，自动模型切换未运行。请在此 Bot 的 Agent 配置中将 RPC 输入设为关闭并保存，再重启会话；其他 Bot 的 RPC 设置不受影响。',
   'card.private.snapshot_note': '🔒 仅你可见的静态快照（不会实时刷新）。点「打开 Web 终端」查看实时画面。',
   'card.private.snapshot_note_no_terminal': '🔒 仅你可见的静态快照（不会实时刷新）。当前后端不提供 Web 终端。',
 

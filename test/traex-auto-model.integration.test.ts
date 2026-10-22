@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawnNodeTsScript } from './helpers/ts-runner.js';
 import type { DaemonToWorker, WorkerToDaemon } from '../src/types.js';
+import { resolveCodexRpcInput } from '../src/services/codex-rpc-input-policy.js';
 
 const children: ChildProcess[] = [];
 const roots: string[] = [];
@@ -29,7 +30,8 @@ function rows(path: string): any[] {
   catch { return []; }
 }
 
-async function fixture(enabled: boolean, loadData: false | 'busy' | 'ordered' = false, reselectPerTurn = false) {
+async function fixture(enabled: boolean, loadData: false | 'busy' | 'ordered' = false, reselectPerTurn = false,
+  rpcPolicy?: { override?: boolean; global: boolean }) {
   const root = mkdtempSync(join(tmpdir(), 'botmux-auto-model-'));
   roots.push(root);
   const dataDir = join(root, 'session');
@@ -143,6 +145,7 @@ setInterval(() => {
   child.send({ type: 'init', sessionId, chatId: 'oc_test', rootMessageId: 'om_root',
     workingDir: dataDir, cliId: 'traex', cliPathOverride: fake, cliSessionId: nativeId,
     resume: true, model: 'core', backendType: binary ? 'tmux' : 'pty', prompt: '',
+    ...(rpcPolicy ? { codexRpcInput: resolveCodexRpcInput('traex', rpcPolicy.override, rpcPolicy.global) } : {}),
     ...(enabled ? { traexAutoModel: { enabled: true, models: ['core', 'backup', 'last'], queueTimeoutMs: 5_000, switchCooldownMs: 5_000,
       reselectPerTurn,
       ...(loadData ? { modelSettings: {
@@ -157,6 +160,14 @@ setInterval(() => {
 }
 
 describe('TraeX auto-model real Worker and PTY', () => {
+  it('warns about inherited RPC on a legacy Auto session instead of silently disabling the controller', async () => {
+    const f = await fixture(true, false, false, { global: true });
+    expect(f.messages).toContainEqual(expect.objectContaining({
+      type: 'user_notify', message: expect.stringContaining('RPC'),
+    }));
+    expect(rows(f.launches)).toHaveLength(1);
+  }, 45_000);
+
   it('resumes exact native history through exhaustion, then runs the next input on the preferred model', async () => {
     const f = await fixture(true, false, true);
     f.child.send({ type: 'message', content: 'original ask', turnId: 'om_first' } satisfies DaemonToWorker);
@@ -183,7 +194,7 @@ describe('TraeX auto-model real Worker and PTY', () => {
   }, 100_000);
 
   it('when all loads are high, holds the lowest allowlisted model and publishes its card identity', async () => {
-    const f = await fixture(true, 'busy');
+    const f = await fixture(true, 'busy', false, { global: true, override: false });
     f.child.send({ type: 'message', content: 'original ask', turnId: 'om_first' } satisfies DaemonToWorker);
     await f.wait(() => rows(f.submissions).length === 2, 'lowest-load continuation');
     expect(rows(f.launches).map(row => row.model)).toEqual(['core', 'last']);

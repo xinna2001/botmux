@@ -18,6 +18,7 @@ export function TraexAutoModelEditor(props: {
   dirty?: boolean;
   storageFailed?: boolean;
   saveStatus?: string;
+  conflict?: string;
   onSave?: () => void;
   onEnabled: (enabled: boolean) => void;
   onReselectPerTurn: (enabled: boolean) => void;
@@ -47,6 +48,9 @@ export function TraexAutoModelEditor(props: {
           {tr('botDefaults.autoModelHelp')}
         </InfoTip>
       </div>
+      {props.conflict ? <p className="hint-warn" role="alert" data-auto-model-conflict="">
+        {props.conflict}
+      </p> : null}
       {props.enabled ? <>
         <label className="bd-auto-model-toggle">
           <input type="checkbox" data-input="autoModelReselectPerTurn" checked={props.reselectPerTurn}
@@ -139,7 +143,7 @@ export function TraexAutoModelEditor(props: {
       </> : null}
       <div className="bd-auto-model-save">
         <button type="button" className="primary" data-action="save-auto-model"
-          disabled={props.busy || !props.dirty} onClick={props.onSave}>
+          disabled={props.busy || !props.dirty || !!props.conflict} onClick={props.onSave}>
           {tr('botDefaults.autoModelSave')}
         </button>
         <span data-auto-model-save-state="" role="status">
