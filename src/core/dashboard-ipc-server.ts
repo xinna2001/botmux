@@ -277,7 +277,7 @@ import {
 } from '../services/headless-session-store.js';
 import { resolveCliSelection, selectionKeyForBot } from '../setup/cli-selection.js';
 import { checkCliAvailability } from '../setup/cli-availability.js';
-import { resolveCodexRpcInput, traexAutoModelRpcConflict } from '../services/codex-rpc-input-policy.js';
+import { resolveBotCodexRpcInput } from '../services/codex-rpc-input-policy.js';
 import { enrichHistorySenders, type HistoryBotInfo } from '../dashboard/history-senders.js';
 import {
   validateCodexAppManagedSendOrigin,
@@ -7518,10 +7518,10 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     traexAutoModel,
     codexRpcInput,
     codexRpcInputDefault,
-    codexRpcInputEffective: resolveCodexRpcInput(cliId, codexRpcInput, codexRpcInputDefault),
-    traexAutoModelBlockedReason: traexAutoModelRpcConflict({
-      cliId, model: model ?? undefined, traexAutoModel, codexRpcInput,
-    }, codexRpcInputDefault) ? 'rpc_input' : null,
+    codexRpcInputEffective: resolveBotCodexRpcInput({
+      cliId, model: model ?? undefined, traexAutoModel, codexRpcInput, wrapperCli, cliLaunchMode,
+    }, codexRpcInputDefault),
+    traexAutoModelBlockedReason: null,
     turnTimeoutMs,
     dshRuntime,
     agentSelectionKey,
@@ -8412,13 +8412,6 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
       const nextCodexRpcInput = rpcFieldPresent
         ? typeof body.codexRpcInput === 'boolean' ? body.codexRpcInput : undefined
         : typeof entry.codexRpcInput === 'boolean' ? entry.codexRpcInput : undefined;
-      if (traexAutoModelRpcConflict({
-        cliId: selected.cliId, model, traexAutoModel: nextTraexAutoModel,
-        codexRpcInput: nextCodexRpcInput, existingAppServer: entry.existingAppServer,
-      }, config.codexRpcInputDefault)) {
-        return { write: false, result: { error: 'traex_auto_model_rpc_conflict',
-          message: '自动模型切换需要终端输入；当前 Bot 生效的 RPC 输入已开启。请将此 Bot 的 RPC 输入设为关闭后保存，其他 Bot 的全局默认不受影响。' } };
-      }
       if (selected.cliId === 'traex' && model.toLowerCase() === TRAEX_AUTO_MODEL_ID
         && (!nextTraexAutoModel || selected.wrapperCli || selected.cliLaunchMode)) {
         return { write: false, result: { error: 'invalid_traex_auto_model',
@@ -8770,7 +8763,7 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
       traexAutoModel: bot.config.traexAutoModel ?? null,
       codexRpcInput: bot.config.codexRpcInput ?? null,
       codexRpcInputDefault: config.codexRpcInputDefault,
-      codexRpcInputEffective: resolveCodexRpcInput(selected.cliId, bot.config.codexRpcInput, config.codexRpcInputDefault),
+      codexRpcInputEffective: resolveBotCodexRpcInput(bot.config, config.codexRpcInputDefault),
       turnTimeoutMs: supportsTurnTimeout ? bot.config.turnTimeoutMs ?? null : null,
       dshRuntime: supportsDshRuntime ? bot.config.dshRuntime ?? null : null,
       dshProfile: supportsDshProfile ? bot.config.dshProfile ?? null : null,

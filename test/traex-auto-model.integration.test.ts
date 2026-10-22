@@ -160,12 +160,15 @@ setInterval(() => {
 }
 
 describe('TraeX auto-model real Worker and PTY', () => {
-  it('warns about inherited RPC on a legacy Auto session instead of silently disabling the controller', async () => {
+  it('automatically uses terminal input for legacy Auto even when the daemon sends inherited RPC', async () => {
     const f = await fixture(true, false, false, { global: true });
-    expect(f.messages).toContainEqual(expect.objectContaining({
-      type: 'user_notify', message: expect.stringContaining('RPC'),
-    }));
-    expect(rows(f.launches)).toHaveLength(1);
+    expect(f.messages.some(message => message.type === 'user_notify' && message.message.includes('RPC'))).toBe(false);
+    expect(rows(f.rpcRequests)).toHaveLength(0);
+    f.child.send({ type: 'message', content: 'original ask', turnId: 'om_legacy' } satisfies DaemonToWorker);
+    await f.wait(() => rows(f.submissions).length === 2, 'legacy Auto continuation');
+    expect(rows(f.launches).map(row => row.model)).toEqual(['core', 'backup']);
+    expect(rows(f.launches).every(row => row.args[0] === 'resume' && row.args.at(-1) === f.nativeId)).toBe(true);
+    expect(rows(f.submissions).filter(row => row.text.startsWith('original ask'))).toHaveLength(1);
   }, 45_000);
 
   it('resumes exact native history through exhaustion, then runs the next input on the preferred model', async () => {

@@ -15,7 +15,7 @@ import { normalizeQuotaFallbackBotConfig } from '../services/quota-fallback.js';
 import { normalizeEnvPolicy, type EnvPolicy } from '../core/env-policy.js';
 import type { TraexAutoModelConfig } from '../services/traex-auto-model.js';
 import { readGlobalConfig } from '../global-config.js';
-import { resolveCodexRpcInput, traexAutoModelRpcConflict } from '../services/codex-rpc-input-policy.js';
+import { resolveBotCodexRpcInput } from '../services/codex-rpc-input-policy.js';
 
 /** Shared parser so a malformed payload can't reach the selector half-shaped;
  *  anything invalid degrades to the registry default (`inherit`). */
@@ -116,10 +116,12 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     ...(bot.traexAutoModel ? { traexAutoModel: bot.traexAutoModel } : {}),
     codexRpcInput: rpcOverride ?? null,
     codexRpcInputDefault: rpcDefault,
-    codexRpcInputEffective: resolveCodexRpcInput(rpcCliId, rpcOverride, rpcDefault),
-    traexAutoModelBlockedReason: traexAutoModelRpcConflict({
+    codexRpcInputEffective: resolveBotCodexRpcInput({
       cliId: rpcCliId, model: j?.model ?? bot.model, traexAutoModel: auto, codexRpcInput: rpcOverride,
-    }, rpcDefault) ? 'rpc_input' : null,
+      wrapperCli: j && Object.prototype.hasOwnProperty.call(j, 'wrapperCli') ? j.wrapperCli : bot.wrapperCli,
+      cliLaunchMode: j && Object.prototype.hasOwnProperty.call(j, 'cliLaunchMode') ? j.cliLaunchMode : bot.cliLaunchMode,
+    }, rpcDefault),
+    traexAutoModelBlockedReason: null,
     ...(bot.modelBackendVariant ? { modelBackendVariant: bot.modelBackendVariant } : {}),
     ...(bot.reasoningEffort ? { reasoningEffort: bot.reasoningEffort } : {}),
     ...(bot.serviceTier ? { serviceTier: bot.serviceTier } : {}),

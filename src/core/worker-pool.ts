@@ -6326,6 +6326,8 @@ function latestCodexRpcInputForRespawn(ds: DaemonSession): boolean | undefined {
     return resolveCodexRpcInput(
       sessionCliId(ds, botCfg), botCfg.codexRpcInput, config.codexRpcInputDefault,
       ds.session.existingAppServerEndpoint,
+      !ds.session.adoptedFrom && !ds.session.wrapperCli && !ds.session.cliLaunchMode
+        ? resolveSessionLaunchModelChoice(ds, botCfg).traexAutoModel : undefined,
     );
   } catch { return undefined; }
 }
@@ -11118,7 +11120,7 @@ export function isForkCapableSession(ds: DaemonSession): boolean {
   // ORing the frozen init flag closes that window (over-refuse, never leak).
   const rpcAtSpawn = ds.initConfig?.codexRpcInput === true;
   if ((cliId === 'codex' || cliId === 'traex')
-    && (rpcAtSpawn || resolveCodexRpcInput(cliId, botCfg.codexRpcInput, config.codexRpcInputDefault))) {
+    && (rpcAtSpawn || latestCodexRpcInputForRespawn(ds))) {
     return false;
   }
   return true;
@@ -13902,6 +13904,8 @@ export function forkWorker(
     // through its terminal and must never trigger BotMux's self-owned RPC engine.
     codexRpcInput: resolveCodexRpcInput(
       agentCfg.cliId, botCfg.codexRpcInput, config.codexRpcInputDefault, existingAppServerEndpoint,
+      !ds.session.adoptedFrom && !agentCfg.wrapperCli && !agentCfg.cliLaunchMode
+        ? agentCfg.traexAutoModel : undefined,
     ),
     ...(existingAppServerEndpoint ? { existingAppServerEndpoint } : {}),
     codexAuthSync: ds.session.cliInstanceBinding

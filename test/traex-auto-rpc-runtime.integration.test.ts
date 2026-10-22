@@ -6,6 +6,7 @@ import { orchestrateCodexRpcInit, type RpcInitEffects } from '../src/codex-rpc-l
 import { requestSessionRestart, __testOnly_resetRestartCoordinator } from '../src/core/worker-pool.js';
 import * as registry from '../src/bot-registry.js';
 import * as globals from '../src/global-config.js';
+import * as sessionStore from '../src/services/session-store.js';
 import { classifyMergedRestart } from '../src/core/restart-followup-policy.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -15,8 +16,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('RPC override in UI and session restart', () => {
-  it('blocks a conflicting Auto save, then submits an explicit bot-only false after operator selection', async () => {
+describe('Automatic input compatibility in UI and session restart', () => {
+  it.each([undefined, false, true])('saves Auto immediately without submitting the stored RPC preference ($0)', async override => {
     let saved: any;
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
       if (init?.method === 'PUT') saved = JSON.parse(String(init.body));
@@ -27,33 +28,63 @@ describe('RPC override in UI and session restart', () => {
     let view: TestRenderer.ReactTestRenderer | undefined;
     try {
       await act(async () => { view = TestRenderer.create(createElement(BotAgentSection, {
-        bot: { larkAppId: 'ui_rpc', cliId: 'traex', model: 'first', codexRpcInputDefault: true },
+        bot: { larkAppId: 'ui_rpc', cliId: 'traex', model: 'first',
+          codexRpcInput: override, codexRpcInputDefault: true },
         sessionFallback: 'traex', patchBot: vi.fn(),
         cliState: { options: [{ id: 'traex', label: 'TraeX' }], ttadkModelDefault: '', ttadkModelSuggestions: [] },
       })); });
       act(() => view!.root.findByProps({ 'data-input': 'autoModelEnabled' }).props.onChange({ currentTarget: { checked: true } }));
-      expect(view!.root.findByProps({ 'data-auto-model-conflict': '' }).props.role).toBe('alert');
-      expect(view!.root.findByProps({ 'data-action': 'save-auto-model' }).props.disabled).toBe(true);
-      await act(async () => { await view!.root.findByProps({ 'data-action': 'save-agent' }).props.onClick(); });
-      expect(saved).toBeUndefined();
-      act(() => view!.root.findByProps({ dataInput: 'agentRpcInput' }).props.onChange('off'));
+      expect(view!.root.findAllByProps({ dataInput: 'agentRpcInput' })).toHaveLength(0);
       expect(view!.root.findAllByProps({ 'data-auto-model-conflict': '' })).toHaveLength(0);
+      expect(view!.root.findByProps({ 'data-action': 'save-auto-model' }).props.disabled).toBe(false);
       await act(async () => { await view!.root.findByProps({ 'data-action': 'save-agent' }).props.onClick(); });
-      expect(saved).toMatchObject({ codexRpcInput: false, model: 'auto',
+      expect(saved).not.toHaveProperty('codexRpcInput');
+      expect(saved).toMatchObject({ model: 'auto',
         traexAutoModel: { enabled: true, models: ['first'] } });
+      act(() => view!.root.findByProps({ 'data-input': 'autoModelEnabled' }).props.onChange({ currentTarget: { checked: false } }));
+      await act(async () => { await view!.root.findByProps({ 'data-action': 'save-agent' }).props.onClick(); });
+      expect(saved).not.toHaveProperty('codexRpcInput');
+      expect(saved.traexAutoModel).toBeNull();
+      expect(saved.model).not.toBe('auto');
     } finally { if (view) act(() => view!.unmount()); }
   });
 
-  it('carries the effective bot override on a real restart IPC and keeps an RPC mode change distinct when requests merge', () => {
+  it.each([undefined, false, true])('adapts restart IPC with stored RPC=$0 and restores it when Auto is disabled', override => {
     vi.spyOn(globals, 'readGlobalConfig').mockReturnValue({ dashboard: { codexRpcInput: true } });
+    vi.spyOn(sessionStore, 'updateSession').mockImplementation(() => {});
+    const botConfig: any = {
+      larkAppId: 'restart_rpc', cliId: 'traex', model: 'auto', codexRpcInput: override,
+      traexAutoModel: { enabled: true, models: ['first', 'backup'], queueTimeoutMs: 30_000 },
+    };
     vi.spyOn(registry, 'getBot').mockReturnValue({ config: {
-      larkAppId: 'restart_rpc', cliId: 'traex', model: 'first', codexRpcInput: false,
+      ...botConfig,
     } } as any);
+    const mockedBot = registry.getBot('restart_rpc').config;
     const send = vi.fn();
-    const session: any = { larkAppId: 'restart_rpc', session: { sessionId: 'rpc-carrier', cliId: 'traex' },
-      worker: { killed: false, send } };
+    const makeSession = (sessionId: string, fields: any = {}, extra: any = {}) => ({
+      larkAppId: 'restart_rpc', session: { sessionId, cliId: 'traex', ...fields },
+      worker: { killed: false, send }, ...extra,
+    }) as any;
+    const session = makeSession('auto-carrier');
     requestSessionRestart(session, { source: 'slash', notify: vi.fn(async () => {}) } as any);
-    expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: 'restart', codexRpcInput: false }));
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: 'restart', codexRpcInput: false, traexAutoModel: botConfig.traexAutoModel, model: 'first',
+    }));
+    for (const [fields, extra] of [
+      [{}, { spawnModelOverride: 'explicit-model' }],
+      [{ dispatchLaunchSpec: { effective: { model: 'dispatch-model' } } }, {}],
+      [{ wrapperCli: 'gateway' }, {}], [{ cliLaunchMode: 'remote' }, {}],
+      [{ adoptedFrom: 'external' }, {}],
+    ]) {
+      requestSessionRestart(makeSession(`boundary-${send.mock.calls.length}`, fields, extra),
+        { source: 'slash', notify: vi.fn(async () => {}) } as any);
+      expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ codexRpcInput: override ?? true }));
+    }
+    mockedBot.model = 'first';
+    mockedBot.traexAutoModel = undefined;
+    requestSessionRestart(makeSession('disabled-carrier'), { source: 'slash', notify: vi.fn(async () => {}) } as any);
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ codexRpcInput: override ?? true, traexAutoModel: null }));
+    expect(mockedBot.codexRpcInput).toBe(override);
     expect(classifyMergedRestart({ windowLaunch: { codexRpcInput: true },
       requested: { codexRpcInput: false }, convergencePending: false })).toBe('converge');
   });
