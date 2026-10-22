@@ -448,7 +448,10 @@ import {
 // callers to parse. Transitive logger.info calls from shared modules would
 // corrupt that stream, so the CLI process runs silent by default. DEBUG=1
 // re-enables logging end-to-end for CLI troubleshooting.
-logger.setSilent(true);
+// Set fleet sinks before Bun can evaluate the bundled entry imports; restoring
+// them only at dispatch is too late for the dashboard's startup log.
+logger.setSilent(!['__core-only', '__daemon', '__worker', '__supervisor', '__dashboard', '__plugin-supervisor']
+  .includes(process.argv[2] ?? ''));
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);

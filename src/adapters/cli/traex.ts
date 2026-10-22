@@ -21,7 +21,7 @@ import {
 } from '../../services/traex-transcript.js';
 import { discoverRolloutSessions } from '../../services/resumable-session-discovery.js';
 import { delay } from '../../utils/timing.js';
-import { traexViewportFooterBusy } from './traex-footer.js';
+import { traexRestoredComposerReady, traexViewportFooterBusy } from './traex-footer.js';
 
 /**
  * TRAE CLI (a.k.a. traex / traecli) adapter.
@@ -563,6 +563,7 @@ export function createTraexAdapter(pathOverride?: string): CliAdapter {
     // first-prompt timeouts wait for this gate without worker-side changes.
     startupPendingPattern: /│[ \t]+(?:model|directory):[ \t]+loading\b/,
     startupReadyPattern: /│[ \t]+model:[ \t]+(?!loading\b)[^│\s][^│\r\n]*│[ \t\r\n]*│[ \t]+directory:[ \t]+(?!loading\b)[^│\s][^│\r\n]*│/,
+    startupReadyFromHistory: traexRestoredComposerReady,
     systemHints: BOTMUX_SHELL_HINTS,
     // Healthy TraeX turns accept parked input while working. The worker fences
     // delivery independently after a terminal/composer conflict or an unknown

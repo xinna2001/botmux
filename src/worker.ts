@@ -11493,6 +11493,16 @@ function observeRestoredStartupHistoryOnScreen(): boolean {
   try { screen = renderer?.rawSnapshot({ preserveFormatting: true }) ?? ''; } catch { return false; }
   if (!screen || idleDetector?.observeStartupHistory(screen) !== true) return false;
   log(`${cliName()} restored composer observed on screen; releasing the startup hold`);
+  // TraeX's quiet-composer timer may already have expired while loading held
+  // it. Re-run that check using the initialized authoritative viewport rather
+  // than waiting for another redraw that a restored idle TUI need not emit.
+  // Keep the existing spinner/static-busy checks and the worker's ready fences.
+  if (lastInitConfig?.cliId === 'traex'
+    && backendScreenEvidenceIsAuthoritativeForMutation()
+    && Date.now() - lastPtyOutputAtMs >= 2_000
+    && screenShowsReadyPattern()) {
+    idleDetector.seedReadyEvidence(true);
+  }
   if (cliAdapter?.supportsTypeAhead) void flushPending();
   return true;
 }

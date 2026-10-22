@@ -31,7 +31,7 @@ function rows(path: string): any[] {
 }
 
 async function fixture(enabled: boolean, loadData: false | 'busy' | 'ordered' = false, reselectPerTurn = false,
-  rpcPolicy?: { override?: boolean; global: boolean }) {
+  rpcPolicy?: { override?: boolean; global: boolean }, restoreWithoutBanner = false) {
   const root = mkdtempSync(join(tmpdir(), 'botmux-auto-model-'));
   roots.push(root);
   const dataDir = join(root, 'session');
@@ -82,8 +82,17 @@ process.stdin.setEncoding('utf8');
 process.stdout.write('\\x1b[?2004h');
 let input = '', pasted = '', submitted = false, completed = false;
 let turnId;
+const startedAt = Date.now();
 function line(payload) { fs.appendFileSync(rollout, JSON.stringify({ timestamp: new Date().toISOString(), type: 'event_msg', payload }) + '\\n'); }
 function idle() {
+  if (${JSON.stringify(restoreWithoutBanner)} && model !== 'core') {
+    if (Date.now() - startedAt < 400) {
+      process.stdout.write('\\x1b[2J\\x1b[H│ model: loading /model to change │\\n│ directory: ${dataDir} │\\n❯ Explain this codebase\\n');
+    } else {
+      process.stdout.write('\\x1b[2J\\x1b[H■ Conversation interrupted - use /feedback if something went wrong\\n⚠ This session is resuming with another model.\\n──────── Configure botmux environment ─\\n❯ Explain this codebase\\n───────────────────────────────────────\\n  ' + model + ' xhigh · ~ · Context 89% left\\n  ☢ Full Access · ? for shortcuts\\n');
+    }
+    return;
+  }
   process.stdout.write('\\x1b[2J\\x1b[H╭──────────────────────────────────────────╮\\n│ model: ' + model + ' /model to change │\\n│ directory: ${dataDir} │\\n╰──────────────────────────────────────────╯\\n❯ Ask TraeCode CLI to do anything\\nContext 99% left\\n');
 }
 function queued() {
@@ -160,6 +169,26 @@ setInterval(() => {
 }
 
 describe('TraeX auto-model real Worker and PTY', () => {
+  it('continues the original turn and queued follow-up when resume restores a composer without a loaded banner', async () => {
+    const f = await fixture(true, false, false, undefined, true);
+    f.child.send({ type: 'message', content: 'original image ask', turnId: 'om_image' } satisfies DaemonToWorker);
+    await f.wait(() => rows(f.submissions).length === 1, 'original image submit');
+    await f.wait(() => /authoritative viewport still shows busy marker|structured turn is unfinished/.test(f.logs.join('')), 'confirmed active queue');
+    f.child.send({ type: 'message', content: 'follow-up image', turnId: 'om_followup' } satisfies DaemonToWorker);
+    await f.wait(() => rows(f.submissions).length === 2, 'restored composer continuation', 30_000);
+    expect(f.logs.join('')).toContain('restored composer observed on screen');
+    expect(rows(f.submissions).filter(row => row.text.startsWith('original image ask'))).toHaveLength(1);
+    expect(rows(f.submissions).filter(row => row.text.startsWith('follow-up image'))).toHaveLength(0);
+    expect(rows(f.launches).every(row => row.args.at(-1) === f.nativeId)).toBe(true);
+    // Let the fake CLI's history receipt finish before completing its turn;
+    // this scenario exercises startup recovery, not terminal-before-receipt.
+    await new Promise(resolveWait => setTimeout(resolveWait, 3_000));
+    writeFileSync(f.release, 'finish');
+    await f.wait(() => rows(f.submissions).length === 3, 'queued follow-up submit', 15_000);
+    expect(rows(f.submissions).filter(row => row.text.startsWith('follow-up image'))).toHaveLength(1);
+    expect(f.messages.some(message => message.type === 'user_notify' && message.message.includes('90 秒'))).toBe(false);
+  }, 70_000);
+
   it('automatically uses terminal input for legacy Auto even when the daemon sends inherited RPC', async () => {
     const f = await fixture(true, false, false, { global: true });
     expect(f.messages.some(message => message.type === 'user_notify' && message.message.includes('RPC'))).toBe(false);
