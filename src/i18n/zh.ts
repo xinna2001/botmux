@@ -103,7 +103,7 @@ export const messages: Record<string, string> = {
   'worker.traex_auto_model.new_turn_switch': '↩️ 收到新输入，已从降级模型 {fromModel} 回到核心模型 {toModel} 重新探测。',
   'worker.traex_auto_model.exhausted': '⚠️ 配置的 {count} 个 TraeX 模型本轮均持续排队。已比较本轮最近可读的队列名次，当前保持 {model} 等待，避免循环切换；不会使用池外模型。',
   'worker.traex_auto_model.shortest_queue': '⚠️ 本轮模型池均排队，{toModel} 最近观测的队列名次最靠前（第 {position} 位）。正在切换并继续原会话，此后保持等待，避免反复切换。',
-  'worker.traex_auto_model.available_model': '↪️ {fromModel} 持续排队，按你的模型顺序选择 {toModel}（当前负载 {load}%），正在续接原会话。如果仍持续排队，会继续检查后续模型。',
+  'worker.traex_auto_model.available_model': '↪️ {fromModel} 持续排队，按你的模型顺序选择首个不需排队的模型 {toModel}（当前负载 {load}%），正在续接原会话。如果仍持续排队，会继续检查后续模型。',
   'worker.traex_auto_model.lowest_load': '⚠️ 后续模型均显示高负载，本轮已排队模型也已纳入比较。选择池内负载最低的 {toModel}（{load}%）续接原会话并保持等待；负载相同时按你的顺序选择。',
   'worker.traex_auto_model.lowest_load_hold': '⚠️ 后续模型均显示高负载，当前 {model} 是池内负载最低的模型（{load}%）。负载相同时按你的顺序选择；保持等待。',
   'worker.traex_auto_model.queued_backup': '↪️ 备用模型 {fromModel} 实际排队，短暂确认后继续尝试模型池中的 {toModel}，正在续接原会话。',
