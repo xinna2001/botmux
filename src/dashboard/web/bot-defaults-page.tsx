@@ -2257,15 +2257,13 @@ export function BotAgentSection(props: {
   const autoConfigKey = JSON.stringify(bot.traexAutoModel ?? null);
   const initialAutoDraft = useRef(selectedAgentCliId(initialKey) === 'traex'
     ? readAutoModelDraft(bot.larkAppId) : undefined);
-  const autoDraftRef = useRef<TraexAutoModelDraft>(initialAutoDraft.current
-    ?? autoModelDraftFromConfig(bot.traexAutoModel, {
+  const autoDraftRef = useRef<TraexAutoModelDraft>(autoModelDraftFromConfig(bot.traexAutoModel, {
       reasoningEffort: bot.reasoningEffort, modelBackendVariant: bot.modelBackendVariant ?? undefined,
-    }));
+    }, initialAutoDraft.current));
   const [cliKey, setCliKey] = useState(initialKey);
   const [cliSelectionTouched, setCliSelectionTouched] = useState(false);
   const [model, setModel] = useState(autoDraftRef.current.enabled ? 'auto'
-    : initialAutoDraft.current && bot.model === 'auto' ? autoDraftRef.current.models[0] ?? ''
-      : typeof bot.model === 'string' ? bot.model : '');
+    : typeof bot.model === 'string' ? bot.model : '');
   const [autoModelEnabled, setAutoModelEnabled] = useState(autoDraftRef.current.enabled);
   const [autoReselectPerTurn, setAutoReselectPerTurn] = useState(autoDraftRef.current.reselectPerTurn);
   const [autoModelTouched, setAutoModelTouched] = useState(!!initialAutoDraft.current);
@@ -2333,22 +2331,17 @@ export function BotAgentSection(props: {
     setCliSelectionTouched(false);
     const stored = selectedAgentCliId(agentSelectionKey(bot, props.sessionFallback)) === 'traex'
       ? readAutoModelDraft(bot.larkAppId) : undefined;
-    const draft = stored ?? autoModelDraftFromConfig(bot.traexAutoModel, {
+    const draft = autoModelDraftFromConfig(bot.traexAutoModel, {
       reasoningEffort: bot.reasoningEffort, modelBackendVariant: bot.modelBackendVariant ?? undefined,
-    });
+    }, stored);
     applyAutoDraft(draft);
-    setModel(draft.enabled ? 'auto' : stored && bot.model === 'auto'
-      ? draft.models[0] ?? '' : typeof bot.model === 'string' ? bot.model : '');
+    setModel(draft.enabled ? 'auto' : typeof bot.model === 'string' ? bot.model : '');
     setAutoModelTouched(!!stored);
     setAutoDraftStorageFailed(false);
     pendingAutoDefaults.current.clear();
-    setModelBackendVariant(stored && !draft.enabled
-      ? draft.modelSettings[draft.models[0] ?? '']?.modelBackendVariant ?? ''
-      : bot.modelBackendVariant ?? '');
+    setModelBackendVariant(bot.modelBackendVariant ?? '');
     setModelBackendVariantTouched(false);
-    setReasoningEffort(stored && !draft.enabled
-      ? draft.modelSettings[draft.models[0] ?? '']?.reasoningEffort ?? ''
-      : bot.reasoningEffort ?? '');
+    setReasoningEffort(bot.reasoningEffort ?? '');
     setServiceTier(bot.serviceTier ?? '');
     setServiceTierTouched(false);
     setNativeModelMode(nativePolicyModeFrom(bot.nativeSubagentRuntime?.model));
@@ -2603,13 +2596,22 @@ export function BotAgentSection(props: {
       };
       const res = await sendJson('PUT', `/api/bots/${encodeURIComponent(bot.larkAppId)}/agent`, body);
       if (res.ok && res.body.ok) {
-        clearAutoModelDraft(bot.larkAppId);
+        const savedAutoConfig = res.body.traexAutoModel ?? undefined;
+        const retainedPreferences = !savedAutoConfig?.enabled && autoDraftRef.current.models.length > 0
+          ? autoDraftRef.current : undefined;
+        // Disabling the feature saves the switch without discarding its pool.
+        // Saving an enabled pool replaces the draft with authoritative config.
+        if (retainedPreferences) {
+          setAutoDraftStorageFailed(!writeAutoModelDraft(bot.larkAppId, retainedPreferences));
+        } else {
+          clearAutoModelDraft(bot.larkAppId);
+          setAutoDraftStorageFailed(false);
+        }
         setAutoModelTouched(false);
-        setAutoDraftStorageFailed(false);
-        applyAutoDraft(autoModelDraftFromConfig(res.body.traexAutoModel ?? undefined, {
+        applyAutoDraft(autoModelDraftFromConfig(savedAutoConfig, {
           reasoningEffort: res.body.reasoningEffort ?? undefined,
           modelBackendVariant: res.body.modelBackendVariant ?? undefined,
-        }));
+        }, retainedPreferences));
         const summary = parseAgentSwitchSummary(res.body);
         const closedCount = summary.closed;
         const residualCount = summary.residual;
